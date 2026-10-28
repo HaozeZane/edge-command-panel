@@ -1525,8 +1525,8 @@ export class CommandHub implements DurableObject {
         } catch (error) {
           await this.rollbackPolicyAndToken(
             api,
-            config.agentAppId,
-            config.agentPolicyId,
+            config.enrollAppId,
+            config.enrollPolicyId,
             token.id,
           );
           throw error;

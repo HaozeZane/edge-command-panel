@@ -17,6 +17,10 @@ export interface FakeToken {
 }
 
 export interface FakePolicy {
+  id?: string;
+  account_id?: string;
+  app_count?: number;
+  reusable?: boolean;
   name: string;
   decision: string;
   precedence: number;
@@ -26,13 +30,25 @@ export interface FakePolicy {
   [key: string]: unknown;
 }
 
+export interface PolicyPutRecord {
+  path: string;
+  body: Record<string, unknown>;
+}
+
 export interface FakeCloudflareState {
   tokens: FakeToken[];
   policies: Record<string, FakePolicy>;
+  appPolicies: Record<string, string[]>;
+  appIds: Record<string, string>;
+  legacyPolicyIds: Set<string>;
   failPolicyPut: boolean;
+  failPolicyPutFor?: string;
+  failNextPolicyPutAfterApplyFor?: string;
+  accountPolicyGetFailure?: { status?: number; network?: boolean };
   failDelete: boolean;
   dropNextCreateResponse: boolean;
   requests: string[];
+  policyPuts: PolicyPutRecord[];
 }
 
 const realFetch = globalThis.fetch;
@@ -53,6 +69,10 @@ export function installFakeCloudflare(): FakeCloudflareState {
     tokens: [],
     policies: {
       "agent-policy": {
+        id: "agent-policy",
+        account_id: "test-account",
+        app_count: 1,
+        reusable: true,
         name: "Agent devices",
         decision: "non_identity",
         precedence: 1,
@@ -62,9 +82,23 @@ export function installFakeCloudflare(): FakeCloudflareState {
         ],
         exclude: [{ ip: { ip: "203.0.113.9" } }],
         require: [],
+        approval_required: true,
+        approval_groups: [{ approvals_needed: 1, email_addresses: ["ops@example.com"] }],
+        connection_rules: {
+          rdp: { allowed_clipboard_local_to_remote_formats: ["text"] },
+        },
+        mfa_config: { allowed_authenticators: ["totp"] },
+        purpose_justification_prompt: "why",
+        purpose_justification_required: true,
         session_duration: "24h",
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-01T00:00:00Z",
       },
       "enroll-policy": {
+        id: "enroll-policy",
+        account_id: "test-account",
+        app_count: 1,
+        reusable: true,
         name: "Enrollment devices",
         decision: "non_identity",
         precedence: 2,
@@ -73,10 +107,20 @@ export function installFakeCloudflare(): FakeCloudflareState {
         require: [],
       },
     },
+    appPolicies: {
+      "agent-app": ["agent-policy"],
+      "enroll-app": ["enroll-policy"],
+    },
+    appIds: {
+      "agent-app": "agent-app",
+      "enroll-app": "enroll-app",
+    },
+    legacyPolicyIds: new Set<string>(),
     failPolicyPut: false,
     failDelete: false,
     dropNextCreateResponse: false,
     requests: [],
+    policyPuts: [],
   };
 
   const fakeFetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
@@ -84,7 +128,7 @@ export function installFakeCloudflare(): FakeCloudflareState {
     if (!url.href.startsWith("http://127.0.0.1:8788/client/v4")) {
       return realFetch(input, init);
     }
-    state.requests.push(`${init?.method ?? "GET"} ${url.pathname}${url.search}`);
+    state.requests.push(`${init?.method ?? "GET"} ${url.pathname.replace("/client/v4", "")}${url.search}`);
     const auth = new Headers(init?.headers).get("authorization");
     if (auth !== "Bearer test-api-token") return cfError("unauthorized", 401);
     const path = url.pathname.replace("/client/v4", "");
@@ -122,16 +166,71 @@ export function installFakeCloudflare(): FakeCloudflareState {
       state.tokens = state.tokens.filter((t) => t.id !== tokenDelete[1]);
       return jsonResponse({ success: true, result: {} });
     }
+    const appGet = /^\/accounts\/test-account\/access\/apps\/([^/]+)$/.exec(path);
+    if (appGet && method === "GET") {
+      const app = appGet[1]!;
+      if (!(app in state.appIds)) return cfError("unknown app", 404);
+      const policies = (state.appPolicies[app] ?? []).map((id) => ({ id }));
+      return jsonResponse({
+        success: true,
+        result: { id: state.appIds[app], policies },
+      });
+    }
+
+    const reusablePolicy = /^\/accounts\/test-account\/access\/policies\/([^/]+)$/.exec(path);
+    if (reusablePolicy) {
+      const policyId = reusablePolicy[1]!;
+      if (method === "GET") {
+        const failure = state.accountPolicyGetFailure;
+        if (failure?.network) throw new Error("simulated network failure");
+        if (failure?.status) return cfError("account policy get failed", failure.status);
+        if (state.legacyPolicyIds.has(policyId) || !state.policies[policyId]) {
+          return cfError("unknown policy", 404);
+        }
+        return jsonResponse({ success: true, result: state.policies[policyId] });
+      }
+      if (method === "PUT") {
+        if (state.legacyPolicyIds.has(policyId) || !state.policies[policyId]) {
+          return cfError("unknown policy", 404);
+        }
+        if (state.failPolicyPut || state.failPolicyPutFor === policyId) {
+          return cfError("policy update failed", 500);
+        }
+        const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+        state.policies[policyId] = { ...state.policies[policyId]!, ...body } as FakePolicy;
+        state.policyPuts.push({ path, body });
+        if (state.failNextPolicyPutAfterApplyFor === policyId) {
+          state.failNextPolicyPutAfterApplyFor = undefined;
+          return cfError("policy update response lost", 500);
+        }
+        return jsonResponse({ success: true, result: state.policies[policyId] });
+      }
+    }
+
     const policyMatch = /^\/accounts\/test-account\/access\/apps\/([^/]+)\/policies\/([^/]+)$/.exec(path);
     if (policyMatch) {
       const [, app, policyId] = policyMatch;
-      if (app !== "agent-app" && app !== "enroll-app") return cfError("unknown app", 404);
+      if (!(app! in state.appIds)) return cfError("unknown app", 404);
       const policy = state.policies[policyId!];
       if (!policy) return cfError("unknown policy", 404);
       if (method === "GET") return jsonResponse({ success: true, result: policy });
       if (method === "PUT") {
-        if (state.failPolicyPut) return cfError("policy update failed", 500);
-        state.policies[policyId!] = JSON.parse(String(init?.body ?? "{}")) as FakePolicy;
+        if (state.failPolicyPut || state.failPolicyPutFor === policyId) {
+          return cfError("policy update failed", 500);
+        }
+        if (!state.legacyPolicyIds.has(policyId!)) {
+          return cfError(
+            "access.api.error.invalid_request: can not update reusable policies through this endpoint",
+            400,
+          );
+        }
+        const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+        state.policies[policyId!] = { ...state.policies[policyId!]!, ...body } as FakePolicy;
+        state.policyPuts.push({ path, body });
+        if (state.failNextPolicyPutAfterApplyFor === policyId) {
+          state.failNextPolicyPutAfterApplyFor = undefined;
+          return cfError("policy update response lost", 500);
+        }
         return jsonResponse({ success: true, result: state.policies[policyId!] });
       }
     }

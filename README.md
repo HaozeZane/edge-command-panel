@@ -127,6 +127,8 @@ wrangler.jsonc       Worker + SQLite DO migration + ASSETS（示例域名）
 3. UI app policy 允许管理员邮箱/群组；API app policy 允许一个手工创建的 API Service Token；Agent 与 Enroll app policy 使用 Service Auth（Service Token）。Worker 会向 **Agent/Enroll policy** 追加一机一 Token，并保留 policy 中未由本系统管理的其它 token/字段。
 4. 记录四个 app 的 AUD、Team domain、Agent/Enroll 的 App ID 和 Policy ID。
 
+Agent 与 Enroll 必须各自使用**独立专用** policy：`decision` 必须是 `non_identity`（Service Auth），且现代 reusable policy 只能绑定对应一个应用（`app_count === 1`）。不要把同一个 policy 共享给 Agent 与 Enroll，也不要绑定多个应用；否则 Worker 会拒绝 provisioning 并提示配置独立策略。对 reusable policy 的写入走 Cloudflare 账户级 `/access/policies/{id}`；只有账户级 GET 明确返回 404 时才回退旧应用级 endpoint。
+
 ### 4.2 后台 API Token
 
 `CLOUDFLARE_API_TOKEN` 只需要该账户范围内的：

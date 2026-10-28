@@ -183,6 +183,8 @@ workflow **不会创建** Cloudflare Access application 或 policy。首次部�
 4. Agent/Enroll policy 需要允许 Service Auth；worker 会在运行期向专用 policy 追加一机一 token，并保留未由本项目管理的其它条目。
 5. `PUBLIC_URL` 的 hostname 将作为 Custom Domain；确保 DNS/zone 与 `zones` 权限匹配。
 
+Agent 与 Enroll 必须各自使用独立专用 policy：`decision` 必须是 `non_identity`，reusable policy 的 `app_count` 必须为 1。共享同一个 policy 或绑定多个应用会被拒绝，并提示配置独立策略。更新 reusable policy 使用账户级 `/access/policies/{policy_id}`；只有账户级 GET 明确 404 时才回退旧的应用级 endpoint，403/429/500/network 不会回退或重试。
+
 Access 配置的更多说明见 README 的 §4.1 / §4.2 与 `docs/PROTOCOL.md`。
 
 ## 4. 首次启用步骤

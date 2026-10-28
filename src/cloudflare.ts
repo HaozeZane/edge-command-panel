@@ -27,6 +27,10 @@ export interface CfServiceToken {
 }
 
 interface PolicyBody {
+  id?: string;
+  account_id?: string;
+  app_count?: number;
+  reusable?: boolean;
   name?: string;
   decision?: string;
   precedence?: number;
@@ -34,6 +38,16 @@ interface PolicyBody {
   exclude?: unknown[];
   require?: unknown[];
   [key: string]: unknown;
+}
+
+interface AccessApplicationBody {
+  id?: string;
+  policies?: Array<{ id?: string } | string>;
+}
+
+interface ResolvedPolicy {
+  kind: "reusable" | "legacy";
+  policy: PolicyBody;
 }
 
 export function provisionConfig(env: Env): ProvisionConfig {
@@ -186,26 +200,122 @@ export class CloudflareAccessApi {
     return tokens.find((t) => t.name === name);
   }
 
-  private async getPolicy(appId: string, policyId: string): Promise<PolicyBody> {
+  private async getApplication(appId: string): Promise<AccessApplicationBody> {
+    return this.request<AccessApplicationBody>(
+      `/accounts/${encodeURIComponent(this.config.accountId)}/access/apps/${encodeURIComponent(appId)}`,
+    );
+  }
+
+  private async getReusablePolicy(policyId: string): Promise<PolicyBody> {
+    return this.request<PolicyBody>(
+      `/accounts/${encodeURIComponent(this.config.accountId)}/access/policies/${encodeURIComponent(policyId)}`,
+    );
+  }
+
+  private async getLegacyPolicy(appId: string, policyId: string): Promise<PolicyBody> {
     return this.request<PolicyBody>(
       `/accounts/${encodeURIComponent(this.config.accountId)}/access/apps/${encodeURIComponent(appId)}/policies/${encodeURIComponent(policyId)}`,
     );
   }
 
-  private static policyPayload(policy: PolicyBody): PolicyBody {
+  private static policyIds(app: AccessApplicationBody): string[] {
+    const policies = Array.isArray(app.policies) ? app.policies : [];
+    return policies
+      .map((policy) => (typeof policy === "string" ? policy : policy?.id))
+      .filter((id): id is string => typeof id === "string" && id.length > 0);
+  }
+
+  private static assertApplicationPolicy(
+    app: AccessApplicationBody,
+    appId: string,
+    policyId: string,
+  ): void {
+    if (app.id !== appId) {
+      throw new ConfigError(
+        `Access application ${appId} returned a different id; check AGENT_ACCESS_APP_ID / ENROLL_ACCESS_APP_ID`,
+      );
+    }
+    if (!CloudflareAccessApi.policyIds(app).includes(policyId)) {
+      throw new ConfigError(
+        `Access application ${appId} does not contain policy ${policyId}; configure dedicated Agent/Enroll policies and use their exact ids`,
+      );
+    }
+  }
+
+  private assertPolicy(
+    policy: PolicyBody,
+    policyId: string,
+    kind: ResolvedPolicy["kind"],
+  ): PolicyBody {
+    if (!policy || policy.id !== policyId) {
+      throw new ConfigError(
+        `Access policy ${policyId} response id does not match; check AGENT_ACCESS_POLICY_ID / ENROLL_ACCESS_POLICY_ID`,
+      );
+    }
+    if (policy.decision !== "non_identity") {
+      throw new ConfigError(
+        `Access policy ${policyId} must use decision non_identity (Service Auth); configure a dedicated Agent/Enroll policy`,
+      );
+    }
+    if (kind === "legacy" && policy.reusable === true) {
+      throw new ConfigError(
+        `Access policy ${policyId} is reusable but was returned by the application-level endpoint; refusing to update it through the legacy endpoint`,
+      );
+    }
+    if (kind === "reusable") {
+      if (
+        policy.account_id !== undefined &&
+        String(policy.account_id).toLowerCase() !== this.config.accountId.toLowerCase()
+      ) {
+        throw new ConfigError(
+          `Access reusable policy ${policyId} belongs to a different account; check CLOUDFLARE_ACCOUNT_ID`,
+        );
+      }
+      if (policy.app_count !== 1) {
+        const count =
+          policy.app_count === undefined ? "missing app_count" : String(policy.app_count);
+        throw new ConfigError(
+          `Access reusable policy ${policyId} must be attached to exactly one application (${count}); configure separate dedicated policies for Agent and Enroll`,
+        );
+      }
+    }
+    return policy;
+  }
+
+  private async resolvePolicy(appId: string, policyId: string): Promise<ResolvedPolicy> {
+    const app = await this.getApplication(appId);
+    CloudflareAccessApi.assertApplicationPolicy(app, appId, policyId);
+    try {
+      const policy = await this.getReusablePolicy(policyId);
+      return { kind: "reusable", policy: this.assertPolicy(policy, policyId, "reusable") };
+    } catch (error) {
+      // Only an explicit account-level 404 may fall back to the legacy
+      // application-level endpoint. Auth, rate-limit, server and network
+      // failures must surface without a retry or a second write path.
+      if (!(error instanceof CloudflareApiError) || error.status !== 404) throw error;
+    }
+    const policy = await this.getLegacyPolicy(appId, policyId);
+    return { kind: "legacy", policy: this.assertPolicy(policy, policyId, "legacy") };
+  }
+
+  private static policyPayload(policy: PolicyBody, kind: ResolvedPolicy["kind"]): PolicyBody {
     const allowed = [
       "name",
       "decision",
-      "precedence",
       "include",
       "exclude",
       "require",
+      "approval_groups",
       "approval_required",
+      "connection_rules",
       "isolation_required",
-      "purpose_justification_required",
+      "mfa_config",
       "purpose_justification_prompt",
+      "purpose_justification_required",
       "session_duration",
+      "policy_resolution_account_id",
     ];
+    if (kind === "legacy") allowed.push("precedence");
     const out: PolicyBody = {};
     for (const key of allowed) {
       if (key in policy) out[key] = policy[key];
@@ -213,11 +323,20 @@ export class CloudflareAccessApi {
     return out;
   }
 
-  private async putPolicy(appId: string, policyId: string, policy: PolicyBody): Promise<void> {
-    await this.request(
-      `/accounts/${encodeURIComponent(this.config.accountId)}/access/apps/${encodeURIComponent(appId)}/policies/${encodeURIComponent(policyId)}`,
-      { method: "PUT", body: JSON.stringify(CloudflareAccessApi.policyPayload(policy)) },
-    );
+  private async putPolicy(
+    appId: string,
+    policyId: string,
+    resolved: ResolvedPolicy,
+    policy: PolicyBody,
+  ): Promise<void> {
+    const path =
+      resolved.kind === "reusable"
+        ? `/accounts/${encodeURIComponent(this.config.accountId)}/access/policies/${encodeURIComponent(policyId)}`
+        : `/accounts/${encodeURIComponent(this.config.accountId)}/access/apps/${encodeURIComponent(appId)}/policies/${encodeURIComponent(policyId)}`;
+    await this.request(path, {
+      method: "PUT",
+      body: JSON.stringify(CloudflareAccessApi.policyPayload(policy, resolved.kind)),
+    });
   }
 
   private static hasToken(include: unknown[], tokenId: string): boolean {
@@ -229,12 +348,12 @@ export class CloudflareAccessApi {
   }
 
   async addServiceTokenToPolicy(appId: string, policyId: string, tokenId: string): Promise<void> {
-    const policy = await this.getPolicy(appId, policyId);
+    const resolved = await this.resolvePolicy(appId, policyId);
+    const policy = resolved.policy;
     const include = Array.isArray(policy.include) ? [...policy.include] : [];
-    if (!CloudflareAccessApi.hasToken(include, tokenId)) {
-      include.push({ service_token: { token_id: tokenId } });
-    }
-    await this.putPolicy(appId, policyId, { ...policy, include });
+    if (CloudflareAccessApi.hasToken(include, tokenId)) return;
+    include.push({ service_token: { token_id: tokenId } });
+    await this.putPolicy(appId, policyId, resolved, { ...policy, include });
   }
 
   async removeServiceTokenFromPolicy(
@@ -242,13 +361,16 @@ export class CloudflareAccessApi {
     policyId: string,
     tokenId: string,
   ): Promise<void> {
-    const policy = await this.getPolicy(appId, policyId);
-    const include = (Array.isArray(policy.include) ? policy.include : []).filter((rule) => {
+    const resolved = await this.resolvePolicy(appId, policyId);
+    const policy = resolved.policy;
+    const current = Array.isArray(policy.include) ? policy.include : [];
+    const include = current.filter((rule) => {
       if (!rule || typeof rule !== "object") return true;
       const st = (rule as { service_token?: { token_id?: unknown } }).service_token;
       return st?.token_id !== tokenId;
     });
-    await this.putPolicy(appId, policyId, { ...policy, include });
+    if (include.length === current.length) return;
+    await this.putPolicy(appId, policyId, resolved, { ...policy, include });
   }
 }
 
