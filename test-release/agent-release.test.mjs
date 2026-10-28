@@ -14,7 +14,7 @@ import {
 const FIXTURES = fileURLToPath(new URL("./fixtures/", import.meta.url));
 const MANIFEST_FIXTURE = join(FIXTURES, "agent-release.fixture.json");
 const RELEASE_FIXTURE = join(FIXTURES, "release");
-const TMP_ROOT = "/tmp/opencode";
+const TMP_ROOT = fileURLToPath(new URL("../.paseo-scratch/test-tmp/", import.meta.url));
 
 async function fixtureManifest() {
   return JSON.parse(await readFile(MANIFEST_FIXTURE, "utf8"));

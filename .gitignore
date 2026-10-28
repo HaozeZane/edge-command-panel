@@ -10,3 +10,5 @@ coverage/
 *.log
 .DS_Store
 .wrangler/
+wrangler.production.generated.json
+worker-secrets.json

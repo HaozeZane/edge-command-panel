@@ -2,7 +2,7 @@
 
 Cloudflare Workers 上的轻量批量命令面板：静态 React 前端 + **单个 SQLite Durable Object** + 主动 WSS 接入的 Linux Agent。所有身份认证只使用 **Cloudflare Access**，没有自建密码、Cookie 会话或设备 Bearer。
 
-> 状态说明：本仓库是 **Web 发布分支**，不包含 Agent 源码，也没有真实部署到任何 Cloudflare 账户。Web 与 Agent 使用不同分支；Agent 二进制只从固定 GitHub Release 获取。Cloudflare 真实部署、Access 撤销传播、Workers Free 账户额度与 Durable Object 长期 Hibernation 均保持 **UNKNOWN**，必须在获得授权后用真实账户验证。
+> 状态说明：本仓库是 **Web 发布分支**，不包含 Agent 源码。Web 与 Agent 使用不同分支；Agent 二进制只从固定 GitHub Release 获取。真实 Cloudflare 部署、Access 撤销传播、Workers Free 账户额度与 Durable Object 长期 Hibernation 均未验收（**UNKNOWN**），必须在获得授权后用真实账户验证。
 
 ## 0. 分支与发布布局
 
@@ -105,11 +105,12 @@ wrangler.jsonc       Worker + SQLite DO migration + ASSETS（示例域名）
 
 ## 4. 部署前置
 
-以下只是步骤，**执行真实部署前必须获得项目所有者明确授权**。仓库使用通用示例值，不包含个人账户 ID 或真实域名：
+以下只是步骤，**执行真实部署前必须获得项目所有者明确授权**。仓库配置使用通用模板（`panel.example.com`），不提交个人账户 ID；GitHub Actions 的 `PUBLIC_URL` Variable 默认 `https://ssh.zhouhaoze.com`，可由 `production` Environment Variable 覆盖为你自己的域名：
 
-- `wrangler.jsonc` 中的路由是 `panel.example.com`，`vars.PUBLIC_URL` 是 `https://panel.example.com`。
-- `account_id` 已从仓库配置中移除；部署时由操作者自己的 Wrangler 登录/环境决定账户。
-- 部署前把示例域名替换为你自己的域名，并同步修改 `vars.PUBLIC_URL`。
+- `wrangler.jsonc` 是本地/CI 校验用的模板，路由为 `panel.example.com`，`vars.PUBLIC_URL` 为 `https://panel.example.com`。
+- `account_id` 已从仓库配置中移除；GitHub Actions 部署时由 `production` Environment 的 `CLOUDFLARE_ACCOUNT_ID` Variable 注入。
+- 生产 workflow 从 `PUBLIC_URL` Variable 生成 `wrangler.production.generated.json`（默认 `https://ssh.zhouhaoze.com`），并以该 origin 的 hostname 生成 Custom Domain 路由。
+- GitHub Environment、Variables、Secrets 与首次启用步骤见 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)。
 
 ### 4.1 Cloudflare 资源
 
@@ -141,15 +142,15 @@ Worker 只调用 service token 与指定 app/policy API，不修改根 UI app、
 
 | 名称 | 说明 |
 | --- | --- |
-| `PUBLIC_URL` | 唯一允许的 origin，例如 `https://panel.example.com`；不匹配的 Host 返回 421 |
+| `PUBLIC_URL` | 唯一允许的 origin，例如 `https://panel.example.com` 或默认 `https://ssh.zhouhaoze.com`；不匹配的 Host 返回 421 |
 | `ACCESS_TEAM_DOMAIN` | 例如 `https://team.cloudflareaccess.com`；生产必须 https |
-| `ACCESS_UI_AUD` / `ACCESS_API_AUD` / `ACCESS_AGENT_AUD` / `ACCESS_ENROLL_AUD` | 四个 app 的 AUD |
+| `ACCESS_UI_AUD` / `ACCESS_API_AUD` / `ACCESS_AGENT_AUD` / `ACCESS_ENROLL_AUD` | 四个 app 的 AUD；四个值必须互不相同 |
 | `ACCESS_API_CLIENT_ID` | 可选，固定自动化 Service Token Client ID，防止其它同 AUD 服务身份调用 |
-| `CLOUDFLARE_API_TOKEN` | 仅后台 provision 使用 |
-| `CLOUDFLARE_ACCOUNT_ID` | 你自己的账户 ID（仅运行期 Secret，不写入仓库） |
+| `CLOUDFLARE_API_TOKEN` | 仅后台 provision 使用。GitHub Actions 中由 `CF_ACCESS_MANAGEMENT_API_TOKEN` Secret 写入此 Worker secret，部署 token 不写入 |
+| `CLOUDFLARE_ACCOUNT_ID` | 你自己的账户 ID（运行期配置变量；不写入仓库文件，由 `production` Environment Variable 注入） |
 | `AGENT_ACCESS_APP_ID` / `AGENT_ACCESS_POLICY_ID` | 设备 app 与 **专用** policy |
 | `ENROLL_ACCESS_APP_ID` / `ENROLL_ACCESS_POLICY_ID` | 注册 app 与 **专用** policy |
-| `CREDENTIAL_ENCRYPTION_KEY` | 32 字节随机值的 base64，例如 `openssl rand -base64 32`；用于 AES-GCM 保存设备 secret |
+| `CREDENTIAL_ENCRYPTION_KEY` | 32 字节随机值的 base64，例如 `openssl rand -base64 32`；用于 AES-GCM 保存设备 secret。GitHub Actions 由同名 Secret 注入 |
 | `USAGE_*_LIMIT` | 可选，覆盖项目日预算（requests/rows read/rows written/log frames/storage bytes），仅用于运维，不建议放宽免费额度假设 |
 
 缺失 Access 配置时 Worker **fail closed**（503）。没有 `AUTH_DISABLED` 后门；`ACCESS_JWKS` 仅允许 loopback issuer + loopback 请求的测试。
@@ -191,13 +192,13 @@ npm run deploy:dry    # 使用已下载附件，但每次重新按 manifest 校�
 ### 5.2 测试分层
 
 ```bash
-npm run test:release   # Node：固定 Release 下载/校验，使用 fixture manifest，不访问网络
+npm run test:release   # Node：固定 Release 下载/校验 + Cloudflare 部署配置生成，使用 fixture，不访问网络
 npm test               # release 测试 + Cloudflare Workers/Miniflare Vitest
 npm --prefix frontend test
 npm --prefix frontend run typecheck
 ```
 
-- `test-release/` 注入 fake `fetch`，覆盖正确下载、manifest/SHA256SUMS 错误、附件哈希错误、HTTP 404、HTML 页面、不完整/占位 manifest、旧缓存重验/重下等场景。fixture manifest 不依赖真实 Release。
+- `test-release/` 注入 fake `fetch`，覆盖正确下载、manifest/SHA256SUMS 错误、附件哈希错误、HTTP 404、HTML 页面、不完整/占位 manifest、旧缓存重验/重下等场景；同时测试部署配置生成、缺项/域名/账号/AES 校验、secret 分离、0600 与 binding 保留。fixture manifest 不依赖真实 Release。
 - `npm test` 使用 `@cloudflare/vitest-pool-workers` 在真实 Workerd/DO 中运行，不是把整个 DO mock 掉。两套测试配置独立（`vitest.config.ts` 与 `vitest.release.config.ts`）。
 - `test/fixtures.ts` 包含**固定测试私钥和假的 `test-api-token`**，仅用于 loopback 自动化测试，不是生产密钥；不要据此整体豁免敏感扫描。
 
@@ -248,28 +249,47 @@ Agent 使用 systemd 长期运行，`-config` 指向 0600 JSON；生产 WSS，�
 `docs/verification.json` 保留的是**拆分前组合项目**的历史快照，已标记 `priorSnapshot: true`，**不构成本 Web 发布分支的验收结论**。
 
 - 历史组合证据：65 个 TypeScript 测试与 Go 测试来自包含 `agent/` 的旧组合项目；拆分后 Web 分支没有 Go 源码，不能把旧 Go 结果直接当作本分支结果。
-- 本次拆分应分别记录：根 `typecheck`、Cloudflare Vitest、前端 `typecheck`/`test`/`build`、Node `test:release` 下载校验。
+- 本次拆分应分别记录：根 `typecheck`、Cloudflare Vitest、前端 `typecheck`/`test`/`build`、Node `test:release` 下载校验与部署配置测试。
 - 真实 Cloudflare 部署、Access 实际行为、Workers Free 账户额度、Durable Object 长期 Hibernation、真实 systemd 安装仍全部为 **UNKNOWN / NOT_RUN**。
 - 本发布对应 Agent 源码 commit `b6a1ec56acaf08888991a6609df368dfa35651fc` 与 `agent-v0.1.0` Release；`agent-release.json` 必须记录该 Release 的真实 `SHA256SUMS` 与附件哈希。以后更新锁文件时同样只能使用真实哈希；占位符或错误哈希会使构建失败。
 
-## 10. 真实部署（需明确授权）
+## 10. GitHub Actions 自动部署
 
-真实部署命令由有权限的操作者执行；本仓库不会自动 deploy，也不会创建新 GitHub Actions 或远端自动运行：
+仓库包含 [`.github/workflows/deploy-cloudflare.yml`](.github/workflows/deploy-cloudflare.yml)。它只在 **`web` 分支**上由 push 或手动 `workflow_dispatch` 触发；job 还会校验仓库为 `HaozeZane/edge-command-panel`、ref 为 `refs/heads/web`。Actions 运行记录见 [Deploy to Cloudflare Workers runs](https://github.com/HaozeZane/edge-command-panel/actions/workflows/deploy-cloudflare.yml)；本文不预判 workflow 当前是否已运行。真实 Cloudflare 部署、Access 行为、额度与休眠未验收（**UNKNOWN**）。
+
+工作流分两段：
+
+1. **`verify-build`（无 production secrets）**：根与前端 `npm ci`、两套 typecheck、根/前端测试、`npm run build`（固定 Release 校验 + Wrangler dry-run），只上传 `frontend/dist` artifact。
+2. **`deploy`（`environment: production`，需 `verify-build` 成功）**：checkout 同一个 `github.sha`，下载**同一次 run** 的 artifact，重新用 `verifyStagedRelease` 核对附件哈希；`DEPLOY_ENABLED` 为 `true` 时才生成临时生产配置与 Worker secrets 文件并执行最终 Wrangler 部署。production 并发 `cancel-in-progress: false`。
+
+**默认只验证构建，不部署。** `DEPLOY_ENABLED` 未设置或不为 `true` 时，deploy job 会在 Step Summary 明确写出“deployment skipped”，不会调用 Cloudflare。
+
+### 10.1 三个 Secret 的区别
+
+| GitHub Environment Secret | 用途 | 最终去向 |
+| --- | --- | --- |
+| `CF_DEPLOY_API_TOKEN` | GitHub Actions 执行 `wrangler deploy` 的 Cloudflare API Token | 只在最终部署步骤作为进程环境变量 `CLOUDFLARE_API_TOKEN`，**绝不写入 Worker** |
+| `CF_ACCESS_MANAGEMENT_API_TOKEN` | Worker 运行期自动创建/回收 Access Service Token | 写入 Worker secret 键 `CLOUDFLARE_API_TOKEN` |
+| `CREDENTIAL_ENCRYPTION_KEY` | AES-GCM 加密设备 secret | 写入 Worker 同名 secret；必须是严格 base64 解码后的 32 bytes |
+
+两个 Cloudflare API Token 的精确权限、Environment Variables 全表、首次启用顺序与故障排查见 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)。
+
+### 10.2 首次启用顺序
+
+1. 在 Cloudflare 先手工配置四个 Access application/policy；workflow **不会**自动创建它们。
+2. 在 GitHub 创建 `production` Environment，限制部署分支为 `web`，配置全部 Variables 与三个 Secrets。
+3. 保持 `DEPLOY_ENABLED=false`（或留空），手动运行 workflow 并选择 `web`；确认 verify/build 通过且 deploy 显示跳过。
+4. 最后把 `DEPLOY_ENABLED` 改为 `true`，再次手动运行；成功后，以后 push `web` 自动部署。暂停自动部署时改回 `false`。
+5. 真实部署、DNS、Access policy 变更与 Agent 服务安装仍需项目所有者授权；不要为部署添加 KV/R2/D1 或升级套餐。
+
+本地仍可用 `npm run deploy:dry` 做无部署校验；手动生产部署不是主路径，必须由有权限的操作者在明确授权下执行：
 
 ```bash
-npm run cf:whoami        # 确认当前 Wrangler 登录的账户
+npm run cf:whoami
 npm run deploy:production
 ```
 
-`workers_dev` 与 `preview_urls` 均为 `false`，公网入口使用你在 `wrangler.jsonc` 中配置的自定义域名（示例为 `panel.example.com`）。部署顺序：
-
-1. 用 `npm run cf:whoami` 确认登录的是你自己的目标账户，并确认套餐假设；未获授权不得为部署本项目而变更套餐。
-2. 把 `wrangler.jsonc` 的示例路由与 `vars.PUBLIC_URL` 改成你的真实域名。
-3. 在 Cloudflare One / Access 中按上表配置 **四个独立 application 与 policy**（UI、API、Agent、Enroll），并覆盖该域名。
-4. 在与部署脚本相同的 `XDG_CONFIG_HOME=.paseo-scratch/cloudflare-auth` 与 `WRANGLER_SEND_METRICS=false` 环境下，用 `npx wrangler secret put <NAME>` 写入 §4.3 的全部生产 Secrets；`PUBLIC_URL` 已在 `vars` 中固定。
-5. **获得用户明确批准后**才执行 `npm run deploy:production`。部署会创建自定义域名并绑定 DNS；未批准前只允许 `npm run deploy:dry`。
-
-注意：Wrangler 的 OAuth 登录（`cf:whoami` 使用的凭据）只用于部署/管理操作，**不等于**后台自动注册设备 Service Token 所需的 Cloudflare API Token。`CLOUDFLARE_API_TOKEN` 必须另行在 Dashboard 创建并作为 Secret 配置，权限见 §4.2。
+注意：Wrangler 的 OAuth 登录（`cf:whoami` 使用的凭据）只用于部署/管理操作，**不等于**后台自动注册设备 Service Token 所需的 Cloudflare API Token。`CLOUDFLARE_API_TOKEN` 必须另行在 Dashboard 创建并作为 Worker secret 配置，权限见 §4.2。
 
 ## 11. 已知限制 / UNKNOWN
 
@@ -279,4 +299,5 @@ npm run deploy:production
 - Access 账户 Service Token 上限 50；大规模机器需另行设计，不在 V1 范围内。
 - 100 只是协议单批 target 上限，**不是可接入机器承诺**。Access Service Token 账户总上限 50，且要扣除 API/Enrollment 等已有 token；单 DO + SQLite + 免费额度不承诺更高规模。
 - 真实部署、DNS、Access policy 变更、Agent 服务安装均需另行授权；本仓库未执行。
+- Actions 运行状态以 [Actions runs](https://github.com/HaozeZane/edge-command-panel/actions/workflows/deploy-cloudflare.yml) 为准；真实 Cloudflare 部署、Access 行为、Workers Free 额度与 Hibernation 未验收（**UNKNOWN**）。
 - Web 构建只验证 Release 附件哈希与文件名，不验证 Agent 源码签名或供应链来源；发布者仍需保护 `agent` 分支和 Release 权限。

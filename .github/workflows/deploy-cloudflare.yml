@@ -1,0 +1,160 @@
+name: Deploy to Cloudflare Workers
+
+on:
+  push:
+    branches:
+      - web
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-build:
+    if: github.repository == 'HaozeZane/edge-command-panel' && github.ref == 'refs/heads/web'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout the triggering commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - name: Install root dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Install frontend dependencies
+        run: npm --prefix frontend ci --no-audit --no-fund
+
+      - name: Typecheck Worker
+        run: npm run typecheck
+
+      - name: Typecheck frontend
+        run: npm --prefix frontend run typecheck
+
+      - name: Test Worker, release verification, and prepare script
+        run: npm test
+
+      - name: Test frontend
+        run: npm --prefix frontend test
+
+      - name: Build frontend, verify pinned Agent release, and dry-run
+        run: npm run build
+
+      - name: Upload frontend/dist for the deploy job
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: frontend-dist
+          path: frontend/dist
+          if-no-files-found: error
+          retention-days: 1
+
+  deploy:
+    needs: verify-build
+    if: github.repository == 'HaozeZane/edge-command-panel' && github.ref == 'refs/heads/web' && needs.verify-build.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: production
+    concurrency:
+      group: cloudflare-production
+      cancel-in-progress: false
+    steps:
+      - name: Checkout the same commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - name: Install locked root dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Download frontend build from this run
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: frontend-dist
+          path: frontend/dist
+
+      - name: Check the production deployment gate
+        id: gate
+        env:
+          DEPLOY_ENABLED: ${{ vars.DEPLOY_ENABLED }}
+        run: |
+          if [ "${DEPLOY_ENABLED:-}" = "true" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "### Cloudflare deployment enabled" >> "$GITHUB_STEP_SUMMARY"
+            echo "DEPLOY_ENABLED is true for the production environment." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "### Cloudflare deployment skipped" >> "$GITHUB_STEP_SUMMARY"
+            echo "DEPLOY_ENABLED is not 'true' in the production environment. This run verified the build only; no Cloudflare deployment was attempted." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Verify downloaded Agent release assets
+        if: steps.gate.outputs.enabled == 'true'
+        run: |
+          node --input-type=module -e '
+            import { verifyStagedRelease } from "./scripts/agent-release.mjs";
+            const manifest = await verifyStagedRelease();
+            console.log("verified " + manifest.tag + " release assets");
+          '
+
+      - name: Prepare production config and Worker secrets
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          PUBLIC_URL: ${{ vars.PUBLIC_URL || 'https://ssh.zhouhaoze.com' }}
+          ACCESS_TEAM_DOMAIN: ${{ vars.ACCESS_TEAM_DOMAIN }}
+          ACCESS_UI_AUD: ${{ vars.ACCESS_UI_AUD }}
+          ACCESS_API_AUD: ${{ vars.ACCESS_API_AUD }}
+          ACCESS_AGENT_AUD: ${{ vars.ACCESS_AGENT_AUD }}
+          ACCESS_ENROLL_AUD: ${{ vars.ACCESS_ENROLL_AUD }}
+          ACCESS_API_CLIENT_ID: ${{ vars.ACCESS_API_CLIENT_ID }}
+          AGENT_ACCESS_APP_ID: ${{ vars.AGENT_ACCESS_APP_ID }}
+          AGENT_ACCESS_POLICY_ID: ${{ vars.AGENT_ACCESS_POLICY_ID }}
+          ENROLL_ACCESS_APP_ID: ${{ vars.ENROLL_ACCESS_APP_ID }}
+          ENROLL_ACCESS_POLICY_ID: ${{ vars.ENROLL_ACCESS_POLICY_ID }}
+          CF_ACCESS_MANAGEMENT_API_TOKEN: ${{ secrets.CF_ACCESS_MANAGEMENT_API_TOKEN }}
+          CREDENTIAL_ENCRYPTION_KEY: ${{ secrets.CREDENTIAL_ENCRYPTION_KEY }}
+        run: |
+          node scripts/prepare-cloudflare-deploy.mjs \
+            --config-out wrangler.production.generated.json \
+            --secrets-out "$RUNNER_TEMP/worker-secrets.json"
+
+      - name: Deploy Worker
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_DEPLOY_API_TOKEN }}
+          WRANGLER_SEND_METRICS: "false"
+        run: |
+          set -euo pipefail
+          if [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
+            echo "::error::CF_DEPLOY_API_TOKEN is not set in the production environment"
+            exit 1
+          fi
+          cleanup() {
+            rm -f wrangler.production.generated.json "$RUNNER_TEMP/worker-secrets.json"
+          }
+          trap cleanup EXIT
+          ./node_modules/.bin/wrangler deploy \
+            --config wrangler.production.generated.json \
+            --secrets-file "$RUNNER_TEMP/worker-secrets.json"
+
+      - name: Remove temporary deployment files
+        if: always()
+        run: |
+          rm -f wrangler.production.generated.json
+          rm -f "$RUNNER_TEMP/worker-secrets.json"
