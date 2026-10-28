@@ -1,0 +1,34 @@
+# Build and release output (source files are never ignored)
+/dist/
+/.release/
+/dist-*/
+/edge-agent-linux-*
+/SHA256SUMS
+*.receipt.txt
+
+# Local scratch directories, including common spelling/separator variants
+.paseo[-_.]scratch*/
+.paseoScratch/
+.paseo-scatch/
+.paseo_scatch/
+
+# Local configuration, credentials and agent state
+config.json
+config.local.json
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+.env
+.env.*
+!.env.example
+state/
+.state/
+state-*/
+.edge-command-agent/
+installation.json
+
+# Logs, caches and editor noise
+*.log
+*.tmp
+.DS_Store
+node_modules/
