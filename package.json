@@ -1,0 +1,30 @@
+{
+  "name": "edge-command-panel",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Cloudflare Workers edge command panel with a single SQLite Durable Object",
+  "scripts": {
+    "prepare:assets": "node scripts/prepare-assets.mjs",
+    "pretest": "node scripts/prepare-assets.mjs",
+    "test": "npm run test:release && XDG_CONFIG_HOME=.paseo-scratch/config WRANGLER_LOG_PATH=.paseo-scratch/wrangler.log WRANGLER_SEND_METRICS=false NPM_CONFIG_CACHE=.paseo-scratch/npm-cache vitest run",
+    "test:release": "XDG_CONFIG_HOME=.paseo-scratch/config WRANGLER_LOG_PATH=.paseo-scratch/wrangler.log WRANGLER_SEND_METRICS=false NPM_CONFIG_CACHE=.paseo-scratch/npm-cache vitest run --config vitest.release.config.ts",
+    "typecheck": "tsc --noEmit",
+    "build:agent": "XDG_CONFIG_HOME=.paseo-scratch/config WRANGLER_LOG_PATH=.paseo-scratch/wrangler.log WRANGLER_SEND_METRICS=false NPM_CONFIG_CACHE=.paseo-scratch/npm-cache node scripts/build-agent.mjs",
+    "build": "XDG_CONFIG_HOME=.paseo-scratch/config WRANGLER_LOG_PATH=.paseo-scratch/wrangler.log WRANGLER_SEND_METRICS=false NPM_CONFIG_CACHE=.paseo-scratch/npm-cache node scripts/build.mjs",
+    "dev": "XDG_CONFIG_HOME=.paseo-scratch/config WRANGLER_LOG_PATH=.paseo-scratch/wrangler.log WRANGLER_SEND_METRICS=false NPM_CONFIG_CACHE=.paseo-scratch/npm-cache node scripts/prepare-assets.mjs && XDG_CONFIG_HOME=.paseo-scratch/config WRANGLER_LOG_PATH=.paseo-scratch/wrangler.log WRANGLER_SEND_METRICS=false NPM_CONFIG_CACHE=.paseo-scratch/npm-cache wrangler dev",
+    "deploy:dry": "XDG_CONFIG_HOME=.paseo-scratch/config WRANGLER_LOG_PATH=.paseo-scratch/wrangler.log WRANGLER_SEND_METRICS=false NPM_CONFIG_CACHE=.paseo-scratch/npm-cache node scripts/build.mjs --no-agent",
+    "cf:whoami": "XDG_CONFIG_HOME=.paseo-scratch/cloudflare-auth WRANGLER_LOG_PATH=.paseo-scratch/wrangler-auth.log WRANGLER_SEND_METRICS=false wrangler whoami",
+    "deploy:production": "XDG_CONFIG_HOME=.paseo-scratch/cloudflare-auth WRANGLER_LOG_PATH=.paseo-scratch/wrangler-auth.log WRANGLER_SEND_METRICS=false wrangler deploy"
+  },
+  "dependencies": {
+    "jose": "6.2.13"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.23.0",
+    "@cloudflare/workers-types": "5.20261028.1",
+    "typescript": "5.9.3",
+    "vitest": "4.1.0",
+    "wrangler": "4.154.0"
+  }
+}

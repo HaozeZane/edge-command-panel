@@ -1,0 +1,25 @@
+export const TEST_ISSUER = "http://127.0.0.1:8787";
+export const TEST_PUBLIC_URL = "http://localhost:8787";
+export const TEST_AUD = {
+  ui: "ui-aud-test",
+  api: "api-aud-test",
+  agent: "agent-aud-test",
+  enroll: "enroll-aud-test",
+};
+
+export const TEST_JWKS = {
+  keys: [
+    {
+      kty: "RSA",
+      n: "3evojXFlzHIMcslEeNw9RD0ibwuwKB_iKJbZCmtp4Eb7nYWenYOVguQdZF4IBpQ48pvJZEQjRzHDwZQY7_bjE-m8x6hAOlzIuJ5lvoe7GPwNS21WXzEFSi3rN8gH6CydTnzrTZr08HE09rHeUwc08P2OC5G-Y4EfBZvSZTyiQynJCPDzlby-bToNdr-PGRNLrWXKa8i6i1540dC9B7wDKNS6ZkeiCoeS2dY-OGCo_fpmGVdqsrj5Me3l7F6Pjf4XRPlcp5qufOR0x3eDGT723UyaX8Q6DgxF14ffSNmprIL26uh81VUjt1jMP3tQ96RoUzo6vb1zrD1iloobUYbtaQ",
+      e: "AQAB",
+      kid: "test-key",
+      alg: "RS256",
+      use: "sig",
+    },
+  ],
+};
+
+export const TEST_PRIVATE_DER_B64 = "MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQDd6+iNcWXMcgxyyUR43D1EPSJvC7AoH+IoltkKa2ngRvudhZ6dg5WC5B1kXggGlDjym8lkRCNHMcPBlBjv9uMT6bzHqEA6XMi4nmW+h7sY/A1LbVZfMQVKLes3yAfoLJ1OfOtNmvTwcTT2sd5TBzTw/Y4Lkb5jgR8Fm9JlPKJDKckI8POVvL5tOg12v48ZE0utZcpryLqLXnjR0L0HvAMo1LpmR6IKh5LZ1j44YKj9+mYZV2qyuPkx7eXsXo+N/hdE+Vynmq585HTHd4MZPvbdTJpfxDoODEXXh99I2amsgvbq6HzVVSO3WMw/e1D3pGhTOjq9vXOsPWKWihtRhu1pAgMBAAECggEAFF/MaHFLms2yYIwjj1hiVD8BR8z8vcT7mFANGhygH6P0sCgXLA1AxJUZMQtEVQehA35pAB2/WBHKD/N+/Jz1M8am+x+dJ0k4cQwIeZ8a1CGOk5O0tSWaKjl1WcLcHaU8RftIW8YeYcAgUDEmoQci2v3fCic1zGCLjrzDwAv6i7bWb/boW4q5OUjucdACXxBJkcXeLJV7kRYiux85otUcmTXMvE/sMWMNtCEnUnIH17LP/zlhl7mumqCD/EEAACm/CZ/GSJpgbC9/OXT8NmWU1KHgv+yoU4Y8uMRVgWzbwbjpvge9OstgFKFYKjogBQVI3A2fmfU+aVbaeXPxiT7BDwKBgQDyWyFNjxZGwf6t/nr5e3wErUr5KaONKIJOYKUX5YeolLbNv+NALXuesItI528BpLL+faS+1dZ3KHLy4oEIxYtXt6jfz+bD61oozYQToX9JidOa6xaUIIR6/w0gVv2Z6Yc/hhHR+9whbSmAxDe0DrkoO5NXhxeMRO5xOEjCsRRQMwKBgQDqakYdaKPsseJMKDlmnnam71YxxZpEpHWXjs56DVFCs/QlMMjfJu8LzX75cjcSUSyVor6kWxUjsH6eKp7LOkJDn9SZ2AIL1K0as5NrlGfxIypeTyfRs4dXnPmGdZPhIisk2WedbnY2llcrnhy4ps07MwKysvFA7weyvy52dzT/8wKBgGzKobF6OMq8jMG4SaWyW+KRk+UzXtqfw5bBZXrLq1DuqPzFVZLal/KNV4j7cuYu87av2gNcZHCK9Ma5DKlOXBWdOS522iU6gfdtAgv54/Sz7QxO2YzW6AF6en747dBodzD50wgK4i8THJ1T95lZPp6j16lj2Bs8Wjjyxh63dOHnAoGAdD1yu06SSuMCpmUj4aEekTUJdvDXyMYMkbT86kUEUKFPpcmFMjLqQt4J4sQiTvD1vNXQ10tbNjFk+CWGTJx9E2+ESy10Bk3V8PGvXp9e05JuhgmWY0Q1DtsGWQig5fi9kC5GVSjbccInQ7fJ4j7EcmCfK+HUBDEDjj2DWrdODsUCgYBlJYMLDmCs5yck0FUfTMSVaBteqgtluxDjWdIi5imJ8gN2xGNbYhFcRjjOHqawmvFw0muOjl4ByuJgdNuA6md6gXNvkcu/eh7S2DAZUJKEfmqDZFvk0H1IIwwyZVanJPVAyt/uX7mgI+EnI0f2cW687efdfKEYqqpzwBkLoovrqw==";
+
+export const ENCRYPTION_KEY = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";

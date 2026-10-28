@@ -1,0 +1,30 @@
+# Copy to .dev.vars for local development. Never commit real values.
+# One Access only: no local auth bypass exists.
+PUBLIC_URL="http://localhost:8787"
+ACCESS_TEAM_DOMAIN="https://your-team.cloudflareaccess.com"
+ACCESS_UI_AUD="replace-with-ui-application-aud"
+ACCESS_API_AUD="replace-with-automation-application-aud"
+ACCESS_AGENT_AUD="replace-with-agent-application-aud"
+ACCESS_ENROLL_AUD="replace-with-enrollment-application-aud"
+# Optional: pin the single automation service-token client id.
+ACCESS_API_CLIENT_ID=""
+
+# Required only for provisioning / install info.
+CLOUDFLARE_API_TOKEN=""
+CLOUDFLARE_ACCOUNT_ID=""
+AGENT_ACCESS_APP_ID=""
+AGENT_ACCESS_POLICY_ID=""
+ENROLL_ACCESS_APP_ID=""
+ENROLL_ACCESS_POLICY_ID=""
+CREDENTIAL_ENCRYPTION_KEY=""
+
+# Optional local test-only values. Non-loopback values are rejected.
+# ACCESS_JWKS='{"keys":[...]}'
+# CLOUDFLARE_API_BASE="http://127.0.0.1:8788/client/v4"
+
+# Optional project-side daily limits (defaults target Workers Free).
+# USAGE_REQUESTS_LIMIT="100000"
+# USAGE_ROWS_READ_LIMIT="1000000"
+# USAGE_ROWS_WRITTEN_LIMIT="50000"
+# USAGE_LOG_FRAMES_LIMIT="10000"
+# USAGE_STORAGE_BYTES_LIMIT="268435456"

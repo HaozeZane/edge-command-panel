@@ -1,0 +1,40 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "edge-command-panel",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-01",
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [
+    {
+      "pattern": "panel.example.com",
+      "custom_domain": true
+    }
+  ],
+  "vars": {
+    "PUBLIC_URL": "https://panel.example.com"
+  },
+  "assets": {
+    "directory": "./frontend/dist",
+    "binding": "ASSETS",
+    "run_worker_first": true,
+    "not_found_handling": "single-page-application"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "HUB",
+        "class_name": "CommandHub"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["CommandHub"]
+    }
+  ],
+  "observability": {
+    "enabled": false
+  }
+}

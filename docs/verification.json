@@ -1,0 +1,53 @@
+{
+  "priorSnapshot": true,
+  "excludedFromCurrentAcceptance": true,
+  "snapshotOf": "Pre-split combined project (Web + Go Agent in one tree)",
+  "verifiedAt": "2026-10-28T11:26:32.304414+00:00",
+  "scope": "Historical local acceptance for the combined project; Access and Cloudflare management APIs were simulated. No production deployment. This file is not evidence for the split Web release branch.",
+  "checks": {
+    "backend": {
+      "status": "PASS",
+      "testFiles": 4,
+      "tests": 37
+    },
+    "frontend": {
+      "status": "PASS",
+      "testFiles": 8,
+      "tests": 28
+    },
+    "typecheck": "PASS",
+    "goRace": "PASS",
+    "realLinuxAgents": {
+      "status": "PASS",
+      "agents": 3,
+      "integrationChecks": 8
+    },
+    "chrome": {
+      "status": "PASS",
+      "desktopWidth": 1440,
+      "mobileWidth": 390,
+      "liveCommand": true,
+      "reloadResumesOutput": true,
+      "uncaughtErrors": 0
+    },
+    "linuxBuild": {
+      "amd64": "PASS",
+      "arm64": "CROSS_COMPILE_PASS"
+    },
+    "workerDeployDryRun": "PASS",
+    "installerShellSyntax": "PASS"
+  },
+  "cloud": {
+    "deployed": false,
+    "realAccessApi": "UNKNOWN",
+    "hibernation": "UNKNOWN",
+    "freeTierAccountAndUsage": "UNKNOWN",
+    "realSystemdInstall": "NOT_RUN"
+  },
+  "binarySha256": {
+    "amd64": "7bc0749ce3131d64527fc3f278905221e014549af44296c77548dca9fe95ec33",
+    "arm64": "6bf168ff3e1f4b0cb01329a304e5850394a3e6e41e2e57b677244fab85414b4a"
+  },
+  "priorLocalEvidence": ".paseo-scratch/acceptance/ (not copied into the Web branch)",
+  "currentSplitEvidence": "See README §9. Run root typecheck/test, frontend typecheck/test/build, and test:release separately; do not cite this prior snapshot as current acceptance."
+}
