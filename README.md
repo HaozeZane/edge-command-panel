@@ -235,6 +235,7 @@ Agent 使用 systemd 长期运行，`-config` 指向 0600 JSON；生产 WSS，�
   - `POST /agents/:id/disable` 本地立即断开并永久阻断重连，同时串行删除其专属 Access Token；Cloudflare 清理失败会返回错误但本地禁用仍生效，重复调用可重试。
   - 撤销 enrollment 同样本地立即生效，并回收其注册 Token；失败保留 revoked 状态，重复 revoke 重试。每日 Alarm 只回收本项目记录的过期/撤销 token，不触碰其它账户 token。
 - 浏览器 WS 最长 15 分钟（或 Access JWT 到期，取更早），Alarm 到期关闭；客户端重连时由 Access 重新鉴权。Access 撤销不保证旧连接立即断开。
+- 关闭 WS 前会先在附件中持久化 `closing` 标志；Alarm 处理与调度只考虑 `OPEN` 且未 `closing` 的连接。重复 Alarm 不会重复 `close`，也不会因残留的过期连接反复排 1ms Alarm；真实 run deadline 与每日清理仍按最早时间保留。
 - `online` 只代表已认证 socket 在线；probe RTT 单独在 attachment 中，可能过期，普通 socket 在线不等于端到端健康。
 
 ## 8. 数据与行为

@@ -92,6 +92,7 @@ interface AgentAttachment {
   connectedAt: number;
   lastSeenAt: number;
   authDeadline: number;
+  closing?: boolean;
   probeId?: string;
   probeSentAt?: number;
   lastProbeAt?: number;
@@ -103,6 +104,7 @@ interface BrowserAttachment {
   kind: "browser";
   expiresAt: number;
   identity: string;
+  closing?: boolean;
 }
 
 type SocketAttachment = AgentAttachment | BrowserAttachment;
@@ -322,6 +324,14 @@ function readAttachment(ws: WebSocket): SocketAttachment | null {
 function attachmentAgent(ws: WebSocket): AgentAttachment | null {
   const a = readAttachment(ws);
   return a?.kind === "agent" ? a : null;
+}
+
+function socketOpen(ws: WebSocket): boolean {
+  return ws.readyState === WebSocket.OPEN;
+}
+
+function socketClosing(ws: WebSocket, attachment: SocketAttachment | null): boolean {
+  return attachment?.closing === true || !socketOpen(ws);
 }
 
 function isTerminal(status: RunStatus): boolean {
@@ -754,6 +764,7 @@ export class CommandHub implements DurableObject {
       const a = attachmentAgent(ws);
       if (
         a &&
+        !socketClosing(ws, a) &&
         a.agentId === row.id &&
         a.connectionId === row.connection_id &&
         a.hello &&
@@ -1923,11 +1934,7 @@ export class CommandHub implements DurableObject {
     for (const old of oldSockets) {
       const a = attachmentAgent(old);
       if (a && a.connectionId !== connectionId) {
-        try {
-          old.close(4001, "replaced by new connection");
-        } catch {
-          // already closed
-        }
+        this.closeAgent(old, 4001, "replaced by new connection");
       }
     }
     this.send(server, { v: PROTOCOL_V, type: "welcome", connectionId });
@@ -1938,6 +1945,7 @@ export class CommandHub implements DurableObject {
 
   private send(ws: WebSocket, frame: ServerFrame): boolean {
     const a = readAttachment(ws);
+    if (socketClosing(ws, a)) return false;
     if (a?.kind === "agent" && a.authDeadline <= nowMs()) {
       this.closeAgent(ws, 4003, "reauth required");
       return false;
@@ -1960,7 +1968,7 @@ export class CommandHub implements DurableObject {
     this.usageDelta.requests += 1;
     try {
       const attachment = readAttachment(ws);
-      if (!attachment) return;
+      if (!attachment || socketClosing(ws, attachment)) return;
       if (attachment.kind === "browser") {
         // Browser sockets are notify-only. Text "ping" is handled by auto-response.
         return;
@@ -2309,6 +2317,16 @@ export class CommandHub implements DurableObject {
   }
 
   private closeAgent(ws: WebSocket, code: number, reason: string): void {
+    const attachment = readAttachment(ws);
+    if (attachment?.closing) return;
+    if (attachment) {
+      try {
+        ws.serializeAttachment({ ...attachment, closing: true });
+      } catch {
+        // The socket is already gone; never retry the close below.
+      }
+    }
+    if (!socketOpen(ws)) return;
     try {
       ws.close(code, reason);
     } catch {
@@ -2319,7 +2337,7 @@ export class CommandHub implements DurableObject {
   private closeAgentSockets(agentId: string, code: number, reason: string): void {
     for (const ws of this.ctx.getWebSockets(agentId)) {
       const a = attachmentAgent(ws);
-      if (a) this.closeAgent(ws, code, reason);
+      if (a && !socketClosing(ws, a)) this.closeAgent(ws, code, reason);
     }
   }
 
@@ -2332,8 +2350,14 @@ export class CommandHub implements DurableObject {
     this.usageDelta.requests += 1;
     try {
       const attachment = readAttachment(ws);
-      if (!attachment) return;
-      if (attachment.kind === "agent") {
+      if (attachment && !attachment.closing) {
+        try {
+          ws.serializeAttachment({ ...attachment, closing: true });
+        } catch {
+          // The socket is already gone.
+        }
+      }
+      if (attachment?.kind === "agent") {
         const row = this.agentRow(attachment.agentId);
         if (row && row.connection_id === attachment.connectionId) {
           this.run(
@@ -2341,9 +2365,10 @@ export class CommandHub implements DurableObject {
             row.id,
           );
           this.notifyAgentsChanged();
-          await this.scheduleAlarm();
         }
       }
+      // Both agent and browser close callbacks must recompute the alarm.
+      await this.scheduleAlarm();
       void code;
       void reason;
       void wasClean;
@@ -2390,7 +2415,8 @@ export class CommandHub implements DurableObject {
     const text = JSON.stringify(frame);
     for (const ws of this.ctx.getWebSockets("browser")) {
       const a = readAttachment(ws);
-      if (!a || a.kind !== "browser" || a.expiresAt <= nowMs()) {
+      if (!a || a.kind !== "browser" || socketClosing(ws, a)) continue;
+      if (a.expiresAt <= nowMs()) {
         this.closeAgent(ws, 4003, "reauth required");
         continue;
       }
@@ -2463,13 +2489,14 @@ export class CommandHub implements DurableObject {
       }
       for (const ws of this.ctx.getWebSockets("browser")) {
         const a = readAttachment(ws);
-        if (a?.kind === "browser" && a.expiresAt <= now) {
+        if (!a || a.kind !== "browser" || socketClosing(ws, a)) continue;
+        if (a.expiresAt <= now) {
           this.closeAgent(ws, 4003, "reauth required");
         }
       }
       for (const ws of this.ctx.getWebSockets()) {
         const a = attachmentAgent(ws);
-        if (!a) continue;
+        if (!a || socketClosing(ws, a)) continue;
         if (a.authDeadline <= now) {
           this.closeAgent(ws, 4003, "reauth required");
         } else if (!a.hello && a.connectedAt + HELLO_TIMEOUT_MS <= now) {
@@ -2530,11 +2557,12 @@ export class CommandHub implements DurableObject {
     }
     for (const ws of this.ctx.getWebSockets("browser")) {
       const a = readAttachment(ws);
-      if (a?.kind === "browser") consider(a.expiresAt);
+      if (!a || a.kind !== "browser" || socketClosing(ws, a)) continue;
+      consider(a.expiresAt);
     }
     for (const ws of this.ctx.getWebSockets()) {
       const a = attachmentAgent(ws);
-      if (!a) continue;
+      if (!a || socketClosing(ws, a)) continue;
       consider(a.authDeadline);
       if (!a.hello) consider(a.connectedAt + HELLO_TIMEOUT_MS);
     }
