@@ -1,6 +1,7 @@
 package enroll
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
@@ -192,5 +193,157 @@ func TestEnrollRequiresHTTPSExceptLoopback(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected https enforcement error")
+	}
+}
+
+func TestEnrollReusePreservesConfigIdentityAndJournal(t *testing.T) {
+	ps := &panelState{}
+	srv := httptest.NewServer(ps.handler(t))
+	defer srv.Close()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "etc", "config.json")
+	stateDir := filepath.Join(dir, "state")
+
+	cfg, err := Run(context.Background(), opts(srv.URL, cfgPath, stateDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	configBefore, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identityPath := filepath.Join(stateDir, "installation.json")
+	identityBefore, err := os.ReadFile(identityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journalPath := filepath.Join(stateDir, "runs", "run-keep.jsonl")
+	if err := os.MkdirAll(filepath.Dir(journalPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	journalBefore := []byte("{\"event\":\"keep\"}\n")
+	if err := os.WriteFile(journalPath, journalBefore, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ps.mu.Lock()
+	hits := ps.challengeHits
+	registers := ps.registerHits
+	ps.mu.Unlock()
+
+	cfg2, err := Run(context.Background(), opts(srv.URL, cfgPath, stateDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg2.AgentID != cfg.AgentID || cfg2.ClientSecret != cfg.ClientSecret {
+		t.Fatalf("reused config changed: %+v -> %+v", cfg, cfg2)
+	}
+	if got, err := os.ReadFile(cfgPath); err != nil || !bytes.Equal(got, configBefore) {
+		t.Fatalf("config was rewritten on reuse: %v", err)
+	}
+	if got, err := os.ReadFile(identityPath); err != nil || !bytes.Equal(got, identityBefore) {
+		t.Fatalf("installation identity changed on reuse: %v", err)
+	}
+	if got, err := os.ReadFile(journalPath); err != nil || !bytes.Equal(got, journalBefore) {
+		t.Fatalf("journal changed on reuse: %v", err)
+	}
+	ps.mu.Lock()
+	if ps.challengeHits != hits || ps.registerHits != registers {
+		t.Fatalf("valid config reuse consumed enrollment quota: challenge %d -> %d, register %d -> %d",
+			hits, ps.challengeHits, registers, ps.registerHits)
+	}
+	ps.mu.Unlock()
+}
+
+func TestEnrollRefusesUnsafeExistingConfigWithoutNetwork(t *testing.T) {
+	valid := []byte(`{"url":"https://panel.example/agent/ws","agentId":"a","clientId":"i","clientSecret":"s","stateDir":"/var/lib/edge-command-agent"}` + "\n")
+
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, dir, cfgPath string)
+	}{
+		{"corrupt_json", func(t *testing.T, dir, cfgPath string) {
+			t.Helper()
+			if err := os.WriteFile(cfgPath, []byte("{not-json"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"too_permissive", func(t *testing.T, dir, cfgPath string) {
+			t.Helper()
+			if err := os.WriteFile(cfgPath, valid, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(cfgPath, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"directory", func(t *testing.T, dir, cfgPath string) {
+			t.Helper()
+			if err := os.Mkdir(cfgPath, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"dangling_symlink", func(t *testing.T, dir, cfgPath string) {
+			t.Helper()
+			if err := os.Symlink(filepath.Join(dir, "missing.json"), cfgPath); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ps := &panelState{}
+			srv := httptest.NewServer(ps.handler(t))
+			defer srv.Close()
+			dir := t.TempDir()
+			cfgPath := filepath.Join(dir, "config.json")
+			stateDir := filepath.Join(dir, "state")
+			tc.setup(t, dir, cfgPath)
+
+			before, err := os.Lstat(cfgPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var beforeBytes []byte
+			if before.Mode().IsRegular() {
+				beforeBytes, err = os.ReadFile(cfgPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			if _, err := Run(context.Background(), opts(srv.URL, cfgPath, stateDir)); err == nil {
+				t.Fatal("expected existing config to be rejected")
+			}
+			ps.mu.Lock()
+			challenges, registers := ps.challengeHits, ps.registerHits
+			ps.mu.Unlock()
+			if challenges != 0 || registers != 0 {
+				t.Fatalf("unsafe config triggered network registration: challenge=%d register=%d", challenges, registers)
+			}
+
+			after, err := os.Lstat(cfgPath)
+			if err != nil {
+				t.Fatalf("config path was removed: %v", err)
+			}
+			if before.Mode() != after.Mode() {
+				t.Fatalf("config path mode changed: %v -> %v", before.Mode(), after.Mode())
+			}
+			if beforeBytes != nil {
+				got, err := os.ReadFile(cfgPath)
+				if err != nil || !bytes.Equal(got, beforeBytes) {
+					t.Fatalf("unsafe config was overwritten: %v", err)
+				}
+			}
+			if before.Mode()&os.ModeSymlink != 0 {
+				if target, err := os.Readlink(cfgPath); err != nil || target != filepath.Join(dir, "missing.json") {
+					t.Fatalf("config symlink was replaced: %q, %v", target, err)
+				}
+			}
+			if _, err := os.Stat(stateDir); !os.IsNotExist(err) {
+				t.Fatalf("state directory was created despite config rejection: %v", err)
+			}
+		})
 	}
 }

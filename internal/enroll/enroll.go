@@ -53,13 +53,26 @@ type registerResponse struct {
 }
 
 // Run registers this machine once and writes the final 0600 config. A valid
-// existing config is reused without contacting the panel.
+// existing config is reused without contacting the panel. An existing config
+// that cannot be loaded (corrupt, too permissive, wrong file type) is a hard
+// error: it is never overwritten and never triggers a new registration.
 func Run(ctx context.Context, opt Options) (*config.Config, error) {
 	if opt.ConfigPath == "" || opt.StateDir == "" {
 		return nil, errors.New("enroll: config and state-dir are required")
 	}
-	if existing, err := config.Load(opt.ConfigPath); err == nil {
+	existing, err := config.Load(opt.ConfigPath)
+	if err == nil {
 		return existing, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("enroll: refusing to replace existing config %s: %w", opt.ConfigPath, err)
+	}
+	// config.Load uses os.Stat, so a dangling symlink also looks absent.
+	// Refuse it instead of replacing an abnormal config path.
+	if _, lerr := os.Lstat(opt.ConfigPath); lerr == nil {
+		return nil, fmt.Errorf("enroll: refusing to replace existing config path %s: %w", opt.ConfigPath, err)
+	} else if !errors.Is(lerr, os.ErrNotExist) {
+		return nil, fmt.Errorf("enroll: cannot inspect config path %s: %w", opt.ConfigPath, lerr)
 	}
 	base, err := validateBaseURL(opt.BaseURL)
 	if err != nil {

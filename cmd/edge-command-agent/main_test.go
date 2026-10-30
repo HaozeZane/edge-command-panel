@@ -49,3 +49,31 @@ func TestConfigureRejectsMissingAgentID(t *testing.T) {
 		t.Fatal("expected missing agent id error")
 	}
 }
+
+func TestConfigureExplicitlyOverwritesExistingConfig(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	stateDir := filepath.Join(dir, "state")
+	t.Setenv("ECP_URL", "https://panel.example")
+	t.Setenv("ECP_CLIENT_ID", "id-one")
+	t.Setenv("ECP_CLIENT_SECRET", "secret-one")
+
+	t.Setenv("ECP_AGENT_ID", "agent-one")
+	if err := runConfigure([]string{"-config", cfgPath, "-state-dir", stateDir}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ECP_AGENT_ID", "agent-two")
+	t.Setenv("ECP_CLIENT_ID", "id-two")
+	t.Setenv("ECP_CLIENT_SECRET", "secret-two")
+	if err := runConfigure([]string{"-config", cfgPath, "-state-dir", stateDir}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AgentID != "agent-two" || cfg.ClientID != "id-two" || cfg.ClientSecret != "secret-two" {
+		t.Fatalf("configure did not overwrite explicit config: %+v", cfg)
+	}
+}

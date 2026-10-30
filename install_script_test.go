@@ -28,11 +28,16 @@ func TestInstallScriptSyntaxAndGuards(t *testing.T) {
 		}
 	}
 	required := []string{
-		"set -eu", "umask 077", "NoNewPrivileges=yes", "KillMode=control-group",
-		"Restart=always", "User=$SERVICE_USER", "ReadWritePaths=$STATE_DIR",
-		"CF-Access-Client-Id", "CF-Access-Client-Secret", `-H "@$HEADER_FILE"`,
-		"chmod 600", "edge-command-agent.service", "--no-start",
-		"systemctl is-active", "ECP_MODE", "ECP_AGENT_ID",
+		"set -eu", "umask 077", "NoNewPrivileges=yes", "ProtectSystem=strict",
+		"PrivateTmp=yes", "KillMode=control-group", "Restart=always",
+		"User=$TARGET_USER", "Group=$TARGET_GROUP",
+		"WorkingDirectory=\"$HOME_ESCAPED\"", "Environment=\"HOME=$HOME_ESCAPED\"",
+		"ReadWritePaths=$STATE_DIR", "CF-Access-Client-Id",
+		"CF-Access-Client-Secret", `-H "@$HEADER_FILE"`, "chmod 600",
+		"edge-command-agent.service", "--no-start", "systemctl is-active",
+		"systemctl stop", "systemctl show", "ActiveState", "chown -h",
+		"ECP_MODE", "ECP_AGENT_ID", "SUDO_USER", "SUDO_UID",
+		"getent passwd", "id -u", "id -g", "TARGET_HOME", "unit_escape",
 		`configure -config "$CONFIG_PATH" -state-dir "$STATE_DIR"`,
 		`enroll -config "$CONFIG_PATH" -state-dir "$STATE_DIR"`,
 		"did not become active",
@@ -42,7 +47,11 @@ func TestInstallScriptSyntaxAndGuards(t *testing.T) {
 			t.Errorf("install.sh missing %q", want)
 		}
 	}
-	for _, forbidden := range []string{"set -x", "envsubst", "jq ", "python", "sudoers"} {
+	for _, forbidden := range []string{
+		"set -x", "envsubst", "jq ", "python", "sudoers",
+		"useradd", "groupadd", "groupdel", "userdel", "SERVICE_USER=",
+		"chown -R", "chown --recursive",
+	} {
 		if strings.Contains(script, forbidden) {
 			t.Errorf("install.sh must not contain %q", forbidden)
 		}

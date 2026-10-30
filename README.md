@@ -14,15 +14,17 @@ Worker and web UI live on the
 
 - Supported targets: **Linux amd64** and **Linux arm64**. The arm64 binary is
   cross-compiled; no physical arm64 host test is claimed.
-- Runtime version for this release line: **0.1.0** (overridable at build time).
+- Runtime version for this release line: **0.1.1** (overridable at build time).
 - Wire protocol: v1. See [docs/PROTOCOL.md](docs/PROTOCOL.md).
 - Real Cloudflare deployment: **UNKNOWN**. No production Worker is verified by
   this branch.
 - Durable Object hibernation behavior on the real platform: **UNKNOWN**.
 - Cloudflare Free plan account limits and actual usage: **UNKNOWN**.
 - Real `systemd` installation on a target machine: **UNKNOWN**. The installer
-  is covered by shell-syntax and static checks, not by a live systemd host run
-  in this repository's local verification.
+  is covered by shell-syntax/static checks and a full mocked install run that
+  redirects every managed path into `.paseo-scratch` and mocks accounts,
+  `systemctl`, `curl`, `install` and `chown`. No live systemd host or real
+  account database is exercised by this repository's local verification.
 
 Do not treat these notes as evidence that the panel is running in the cloud.
 Local unit tests and cross-compilation only prove the artifacts build and the
@@ -34,11 +36,11 @@ The repository root is the Go module root; build from the checkout root.
 
 ```sh
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
-  -ldflags "-s -w -X main.Version=0.1.0" \
+  -ldflags "-s -w -X main.Version=0.1.1" \
   -o dist/edge-agent-linux-amd64 ./cmd/edge-command-agent
 
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath \
-  -ldflags "-s -w -X main.Version=0.1.0" \
+  -ldflags "-s -w -X main.Version=0.1.1" \
   -o dist/edge-agent-linux-arm64 ./cmd/edge-command-agent
 ```
 
@@ -51,9 +53,9 @@ Requires Go 1.22+. The only third-party dependency is
 attachments:
 
 ```sh
-scripts/build-release.sh                 # version 0.1.0
-scripts/build-release.sh agent-v0.1.0    # normalized to 0.1.0
-RELEASE_OUTPUT_DIR=/tmp/ecp-release scripts/build-release.sh 0.1.0
+scripts/build-release.sh                 # version 0.1.1
+scripts/build-release.sh agent-v0.1.1    # normalized to 0.1.1
+RELEASE_OUTPUT_DIR=/tmp/ecp-release scripts/build-release.sh 0.1.1
 ```
 
 The default output directory is `.release/agent-v<version>`. Set `GO` to use a
@@ -89,15 +91,62 @@ Use your own panel hostname in place of `panel.example.com`. The script:
   `$ECP_URL/agent/download/$arch` or `$ECP_URL/enroll/download/$arch`
   using headers read from a 0600 temporary file (never argv),
 - rejects non-200 responses and files that do not run as an agent binary,
-- creates the dedicated system user/group `edge-command` (no sudo, nologin),
+- selects the service account from the invoking account (see below), without
+  creating a dedicated `edge-command` user or group,
+- validates the target home and every managed path before changing the host,
+- stops an existing service, confirms systemd reports `inactive`/`failed`
+  (a stop error, an unreachable manager or an unknown state aborts) before
+  replacing the binary, configuration or state ownership,
 - creates `/etc/edge-command-agent/config.json` (0600, owned by the service
-  user) and `/var/lib/edge-command-agent` (0700),
+  account) and `/var/lib/edge-command-agent` (0700),
 - installs a hardened systemd unit
   (`Restart=always`, `KillMode=control-group`, `NoNewPrivileges=yes`,
-  `ProtectSystem=strict`, `ReadWritePaths=/var/lib/edge-command-agent`),
+  `ProtectSystem=strict`, `PrivateTmp=yes`,
+  `ReadWritePaths=/var/lib/edge-command-agent`),
 - enables and starts the service, and exits non-zero unless it is active.
 
-Use `--no-start` to install and validate without enabling/starting.
+Use `--no-start` to install and validate without enabling/starting. On an
+upgrade, `--no-start` still stops a running service and leaves it stopped.
+
+### Service account
+
+The agent runs as the account that installed it:
+
+- **Plain root install:** the target is `root`.
+- **Install through `sudo`:** the target is `SUDO_USER`, but only when both
+  `SUDO_USER` and `SUDO_UID` are present and agree with the NSS account
+  database (`getent passwd`, `getent group`, `id -u` and `id -g`). The primary
+  GID and home directory are taken from NSS; inherited `HOME` and `SUDO_GID`
+  are not trusted.
+- Missing, incomplete or contradictory sudo metadata is rejected before any
+  host change. So is a target home that is relative, contains control
+  characters or `..` components, is missing, or is a symlink.
+
+The systemd unit uses the target user/group, sets `WorkingDirectory` and
+`HOME` to the NSS home directory (with systemd escaping), and lets systemd
+apply that account's supplementary groups from NSS. When the target account is
+already in use, the installer does not delete it; a legacy `edge-command`
+account from an older install is left untouched.
+
+Running the agent as the same UID as the installer is **not** the same as
+giving the service a full interactive login shell. The service still runs
+under `NoNewPrivileges=yes`, `ProtectSystem=strict`, `PrivateTmp=yes`, and a
+single writable `ReadWritePaths` state directory; it has no TTY and no login
+session. Conversely, a root install means commands execute with UID 0, so
+those systemd restrictions limit but do not make root harmless. Prefer
+installing through a non-root sudo account unless root execution is required.
+
+### Upgrade behavior
+
+Reinstalling stops the currently active agent before replacing the binary,
+unit and ownership, then starts it again unless `--no-start` was used. A
+reinstall therefore interrupts a command that is running at that moment; a
+run interrupted this way is recorded as interrupted and its business command
+is not replayed. The fixed paths `/etc/edge-command-agent/config.json` and
+`/var/lib/edge-command-agent` are preserved, and enrollment reuses an existing
+valid config, installation key and journal. Any failure before the stop is
+reported without touching the host; a failure after the stop never starts a
+half-migrated service.
 
 ## Credentials and enrollment modes
 
@@ -140,15 +189,22 @@ only for loopback development hosts; production must use WSS. The config file
 must be mode 0600. The secret is never logged and never accepted on argv.
 
 Commands run as `/bin/sh -c <command>` in the service account home (the
-systemd `WorkingDirectory` is the state directory), with stdin connected to
+systemd `WorkingDirectory` is the target home), with stdin connected to
 `/dev/null`, one run at a time, in a dedicated process group. The agent does
-not sandbox or privilege-separate individual commands; it runs them as the
-unprivileged `edge-command` service user.
+not sandbox or privilege-separate individual commands; they run under the
+same UID/GID and supplementary groups as the service. The systemd hardening
+described above still applies to every command.
 
 ## Enrollment
 
 Enrollment registers this machine once and writes the final 0600 config. A
-valid existing config is reused without contacting the panel.
+valid existing config is reused without contacting the panel and without
+consuming enrollment quota. Only a genuinely absent config starts
+registration. An existing config that is corrupt, has unsafe permissions or
+is not a regular file is a hard error: it is not overwritten and no
+challenge/register request is made. A dangling symlink at the config path is
+also rejected. `configure` keeps its explicit-overwrite behavior for direct
+mode.
 
 ```sh
 ECP_URL=https://panel.example.com ECP_CLIENT_ID=… ECP_CLIENT_SECRET=… \
@@ -221,5 +277,12 @@ The suite covers exit codes, stdout/stderr, burst output, 1 MiB truncation,
 timeout/descendant cleanup, duplicate suppression, restart interruption,
 disconnect while a command keeps running with ACK-loss replay, probes,
 CF-Access headers, secret redaction, enrollment signatures/retries/reuse,
-invalid configs and plaintext URL rejection, journal limits, disk/lock
-failures, and install-script syntax/security guards.
+refusal to overwrite corrupt or unsafe configs, invalid configs and plaintext
+URL rejection, journal limits, disk/lock failures, and install-script
+syntax/security guards. The installer is additionally executed end-to-end
+against a copy whose fixed paths are redirected into `.paseo-scratch`, with
+mocked `id`/`getent`/`systemctl`/`curl`/`install`/`chown`: root and sudo
+identity selection, unit escaping, unchanged sandbox directives,
+stop-before-migration ordering, `--no-start`, metadata/download/stop failures,
+symlink rejection, and preservation of config, installation identity and
+journal.
