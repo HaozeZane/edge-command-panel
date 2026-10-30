@@ -9,8 +9,8 @@ Cloudflare Workers 上的轻量批量命令面板：静态 React 前端 + **单�
 | 内容 | 位置 |
 | --- | --- |
 | Web 前端 + Worker + Durable Object | 默认分支 `web`（本仓库） |
-| Agent 源码（Go） | 独立分支 `agent`，commit [`b6a1ec5`](https://github.com/HaozeZane/edge-command-panel/commit/b6a1ec56acaf08888991a6609df368dfa35651fc)，不在本分支 |
-| Agent 二进制 / 安装脚本 | GitHub Release [`agent-v0.1.0`](https://github.com/HaozeZane/edge-command-panel/releases/tag/agent-v0.1.0) |
+| Agent 源码（Go） | 独立分支 `agent`，commit [`695bffbe`](https://github.com/HaozeZane/edge-command-panel/commit/695bffbee45fdce3d31e28f167bfe90cf21638cf)，不在本分支 |
+| Agent 二进制 / 安装脚本 | GitHub Release [`agent-v0.1.1`](https://github.com/HaozeZane/edge-command-panel/releases/tag/agent-v0.1.1) |
 
 Web 分支没有 `agent/` 目录，也不需要 Go 工具链即可完整构建。构建阶段只从**固定 Release** 匿名下载以下三个附件，并按 `agent-release.json` 校验后写入 `frontend/dist/downloads/`：
 
@@ -28,7 +28,7 @@ Web 分支没有 `agent/` 目录，也不需要 Go 工具链即可完整构建�
 {
   "schemaVersion": 1,
   "repository": "HaozeZane/edge-command-panel",
-  "tag": "agent-v0.1.0",
+  "tag": "agent-v0.1.1",
   "agentCommit": "<40 位小写 hex Agent 提交>",
   "checksumsSha256": "<SHA256SUMS 本身的 64 位小写 hex SHA-256>",
   "assets": {
@@ -39,7 +39,7 @@ Web 分支没有 `agent/` 目录，也不需要 Go 工具链即可完整构建�
 }
 ```
 
-- 本发布锁定 Agent 源码 commit `b6a1ec56acaf08888991a6609df368dfa35651fc` 与 `agent-v0.1.0` Release；`agent-release.json` 记录该 Release 的 `SHA256SUMS` 和三个附件的真实 SHA-256。以后更新 Release/锁文件时同样必须填入对应的真实哈希，不得编造或复用旧值；占位符、非 64 位小写 hex 值或任何校验失败都会让 `npm run build` 立即失败，不会回退到 `latest`，也不会跳过校验。
+- 本发布锁定 Agent 源码 commit `695bffbee45fdce3d31e28f167bfe90cf21638cf` 与 `agent-v0.1.1` Release；`agent-release.json` 记录该 Release 的 `SHA256SUMS` 和三个附件的真实 SHA-256。以后更新 Release/锁文件时同样必须填入对应的真实哈希，不得编造或复用旧值；占位符、非 64 位小写 hex 值或任何校验失败都会让 `npm run build` 立即失败，不会回退到 `latest`，也不会跳过校验。
 - 校验顺序固定：先下载 `SHA256SUMS` 并核对 `checksumsSha256`，再严格解析三个附件条目并与 `assets` 比对，最后才下载二进制/安装脚本并逐个核对 SHA-256。
 - 任一失败、缺附件、HTTP 错误、返回 HTML 页面、哈希不符或旧缓存不匹配都会使构建失败；旧缓存只会被重新校验或重新下载，绝不会冒充成功。
 - 不需要 GitHub Token。构建脚本不会读取或写入 GitHub 凭据，也不会执行安装脚本或 `systemd`。
@@ -206,13 +206,13 @@ npm --prefix frontend run typecheck
 
 ## 6. 安装 Agent
 
-Agent 由独立 `agent` 分支维护，二进制由 `agent-v0.1.0` Release 提供。在面板中创建机器或注册批次后，`GET /agents/:id/install` 返回：
+Agent 由独立 `agent` 分支维护，二进制由 `agent-v0.1.1` Release 提供。在面板中创建机器或注册批次后，`GET /agents/:id/install` 返回：
 
 - `command`：可直接执行的单行命令，已安全 shell-quote；
 - `link`：`PUBLIC_URL/install#<base64url(JSON)>`，前端 InstallView 可复制/下载；
 - `script`：自包含脚本，含 shebang、`export ECP_URL/MODE/CLIENT_ID/CLIENT_SECRET[/AGENT_ID]` 和通用安装逻辑。
 
-命令先下载临时文件，`trap` 清理，下载失败不会把空内容交给 bash 返回 0。客户端不得缓存或记录含密响应（服务端 `Cache-Control: no-store`、`Referrer-Policy: no-referrer`）。
+命令先下载临时文件，`trap` 清理，下载失败不会把空内容交给 bash 返回 0。单行命令会自动判断执行身份：root 直接执行安装命令；普通用户自动通过 sudo 执行同样的安装命令（Agent 按安装时所用的账号运行，sudo 前为原登录账号，现有 systemd 服务隔离设置继续适用），下载脚本供普通用户以 `sudo bash install.sh` 执行。客户端不得缓存或记录含密响应（服务端 `Cache-Control: no-store`、`Referrer-Policy: no-referrer`）。
 
 批量注册：
 
@@ -254,7 +254,7 @@ Agent 使用 systemd 长期运行，`-config` 指向 0600 JSON；生产 WSS，�
 - 历史组合证据：65 个 TypeScript 测试与 Go 测试来自包含 `agent/` 的旧组合项目；拆分后 Web 分支没有 Go 源码，不能把旧 Go 结果直接当作本分支结果。
 - 本次拆分应分别记录：根 `typecheck`、Cloudflare Vitest、前端 `typecheck`/`test`/`build`、Node `test:release` 下载校验与部署配置测试。
 - 真实 Cloudflare 部署、Access 实际行为、Workers Free 账户额度、Durable Object 长期 Hibernation、真实 systemd 安装仍全部为 **UNKNOWN / NOT_RUN**。
-- 本发布对应 Agent 源码 commit `b6a1ec56acaf08888991a6609df368dfa35651fc` 与 `agent-v0.1.0` Release；`agent-release.json` 必须记录该 Release 的真实 `SHA256SUMS` 与附件哈希。以后更新锁文件时同样只能使用真实哈希；占位符或错误哈希会使构建失败。
+- 本发布对应 Agent 源码 commit `695bffbee45fdce3d31e28f167bfe90cf21638cf` 与 `agent-v0.1.1` Release；`agent-release.json` 必须记录该 Release 的真实 `SHA256SUMS` 与附件哈希。以后更新锁文件时同样只能使用真实哈希；占位符或错误哈希会使构建失败。
 
 ## 10. GitHub Actions 自动部署
 

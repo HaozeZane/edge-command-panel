@@ -152,7 +152,9 @@ export const InstallPortal: React.FC = () => {
               </h3>
               <ol className="text-xs text-slate-300 space-y-2 list-decimal list-inside leading-relaxed">
                 <li>通过 SSH 登录到目标 Linux 机器（支持 Linux x86_64 / arm64，安装脚本将自动联网拉取运行时）。</li>
-                <li>以具备 root 或 sudo 权限的账号粘贴上述命令并回车执行。</li>
+                <li>以 root 或具备 sudo 权限的账号粘贴上述命令并回车执行；普通用户的命令会自动通过 sudo 安装，可能提示当前 sudo 密码。</li>
+                <li>Agent 以安装时所用的账号运行：root 安装即以 root 身份运行，sudo 安装则发起安装的原登录账号运行，现有 systemd 服务隔离设置继续适用。</li>
+                <li>重复执行批量接入（enroll）安装且本机已存在有效配置时，会复用原机器身份：不新增机器、不消耗注册名额；单台机器（direct）安装则会以所选机器凭据显式覆盖本机配置。两种情况下安装都会升级并重启 Agent，可能中断正在执行的命令；本地旧业务命令记录不会重跑。</li>
                 <li>执行完毕后，Agent 会作为后台守护服务启动并建立与面板的 WebSocket 长连接。</li>
                 <li>稍后在 Edge Command 面板机器列表中即可看到该机器（默认显示系统主机名 hostname）。</li>
               </ol>

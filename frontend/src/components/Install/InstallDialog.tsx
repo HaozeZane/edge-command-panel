@@ -58,7 +58,7 @@ export const InstallDialog: React.FC<InstallDialogProps> = ({
       isOpen={isOpen}
       onClose={onClose}
       title={title}
-      description={agentName ? `目标机器: ${agentName}` : '请在目标 Linux 系统中以 root 或 sudo 权限运行'}
+      description={agentName ? `目标机器: ${agentName}` : '请在目标 Linux 系统中运行安装命令（root 或 sudo）'}
       maxWidth="2xl"
     >
       <div className="space-y-6">
@@ -68,6 +68,9 @@ export const InstallDialog: React.FC<InstallDialogProps> = ({
           <div>
             <span className="font-semibold">凭据保管须知：</span>
             本命令与脚本内含专属 One 设备凭据（可重复获取与安装）。请妥善保存，切勿泄露或提交至公开代码仓库。机器上线后将默认使用系统主机名（hostname）登记。
+            <br />
+            <span className="font-semibold">运行身份说明：</span>
+            以 root 执行安装时 Agent 将以 root 身份运行；通过 sudo 执行安装时 Agent 将以发起安装的原登录账号运行，现有 systemd 服务隔离设置继续适用。
           </div>
         </div>
 
@@ -102,6 +105,9 @@ export const InstallDialog: React.FC<InstallDialogProps> = ({
               <code>{installInfo.command}</code>
             </pre>
           </div>
+          <p className="text-[11px] text-slate-400 leading-relaxed">
+            普通用户粘贴执行即可：命令会自动通过 sudo 安装（可能提示当前 sudo 密码），Agent 随后以发起安装的原登录账号运行；以 root 执行则 Agent 以 root 运行（现有 systemd 服务隔离继续适用）。注意：复用本机身份、不新增机器且不消耗注册名额，仅适用于重复执行批量接入（enroll）安装且本机已存在有效配置的情况；单台机器（direct）安装仍会以所选机器的凭据显式覆盖本机配置。复用或覆盖时都会升级 Agent 并伴随服务重启，可能中断正在执行的任务；已保留的本地旧业务命令记录不会重新执行。
+          </p>
         </div>
 
         {/* Option 2: Web Install Link */}
@@ -149,7 +155,7 @@ export const InstallDialog: React.FC<InstallDialogProps> = ({
             <div>
               <div className="text-xs font-semibold text-slate-700">方式三：自包含安装脚本</div>
               <p className="text-[11px] text-slate-400">
-                下载 <code>install.sh</code>（需联网拉取 Agent 运行时），在目标 Linux 机器执行 <code>bash install.sh</code>
+                下载 <code>install.sh</code>（需联网拉取 Agent 运行时），普通用户在目标 Linux 机器执行 <code>sudo bash install.sh</code>，root 可直接执行 <code>bash install.sh</code>
               </p>
             </div>
             <button
