@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";import { join } from "node:path";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   buildInstallCommand,
@@ -12,9 +13,9 @@ import {
 // Node-only integration test for the generated one-line install command.
 // Everything runs against mock `id`/`sudo`/`curl` binaries plus a stub
 // installer payload inside the workspace scratch dir: no real sudo, no
-// systemd, no network. Assertions never compare the raw command or secrets
-// through expect() snapshots — failure diffs only reveal digests and flags,
-// never credential-bearing text.
+// systemd, no network. Assertions never compare the raw command, private
+// script, or secrets through expect() snapshots — failure output only shows
+// digests and flags, never credential-bearing text.
 
 const TMP_ROOT = fileURLToPath(new URL("../.paseo-scratch/test-tmp/", import.meta.url));
 const BASH = "/bin/bash";
@@ -39,22 +40,22 @@ function sha(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
-function shellQuote(value) {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
 function fakeId(uid) {
   return `#!/bin/sh\nprintf '%s\n' '${uid}'\n`;
 }
 
-// Records its argv one-per-line, exports the invoking-account metadata the
-// way real sudo does (metadata passed through to the installer stub), then
-// execs the identical command (no privilege change) so the rest of the
-// pipeline runs for real.
+// Records its argv one-per-line; records the private script's mode and bytes
+// digest before exec; exports the invoking-account metadata the way real sudo
+// does (metadata passed through to the installer stub); then execs the
+// identical command (no privilege change) so the rest runs for real.
 function fakeSudo() {
   return [
     "#!/bin/sh",
     'for a in "$@"; do printf \'%s\\n\' "$a" >> "$SUDO_LOG"; done',
+    'if [ "$#" -ge 2 ]; then',
+    '  stat -c \'%a\' "$2" >> "$SUDO_STAT_LOG" 2>/dev/null',
+    '  sha256sum "$2" 2>/dev/null | cut -d\' \' -f1 >> "$SUDO_STAT_LOG"',
+    "fi",
     "export SUDO_USER=testuser-alice",
     "export SUDO_UID=1000",
     'exec "$@"',
@@ -113,6 +114,7 @@ async function setupCase(name, { uid, curlFail }) {
     PATH: `${binDir}:/usr/bin:/bin`,
     TMPDIR: dir,
     SUDO_LOG: join(dir, "sudo.args"),
+    SUDO_STAT_LOG: join(dir, "sudo.stat"),
     INSTALL_LOG: join(dir, "install.log"),
     CURL_PAYLOAD: payload,
   };
@@ -132,6 +134,13 @@ function runCommand(dir, spawnEnv, command) {
 
 async function expectAbsent(dir, name) {
   await expect(stat(join(dir, name))).rejects.toThrow();
+}
+
+// Both traps (bootstrap private script + inner download temp file) must clean
+// up their mktemp artifacts (mktemp default prefix `tmp.`) on exit.
+async function leftoverTempCount(dir) {
+  const names = await readdir(dir);
+  return names.filter((name) => /^tmp\./.test(name)).length;
 }
 
 function parseLog(content) {
@@ -158,36 +167,51 @@ const SECRET_PAIRS = () => [
   ["ECP_AGENT_ID", AGENT_ID],
 ];
 
+function assertNoSecretsInSudoArgs(sudoArgs) {
+  const joined = sudoArgs.join(" ");
+  expect(
+    "no-clientid?" + (joined.includes(clientId) ? "leak" : "safe") +
+      ",no-secret?" + (joined.includes(clientSecret) ? "leak" : "safe") +
+      ",no-cf-header?" + (joined.includes("CF-Access") ? "leak" : "safe") +
+      ",no-env-exports?" + (joined.includes("ECP_") ? "leak" : "safe"),
+  ).toBe("no-clientid?safe,no-secret?safe,no-cf-header?safe,no-env-exports?safe");
+}
+
 describe("generated install command (mocked uid/sudo/curl)", () => {
-  it("builds the root/sudo branch around the identical bash command", () => {
+  it("bootstraps a private temp script; sudo argv carries only bash + path", () => {
     const inner = buildInstallInner(BASE, MODE, { clientId, clientSecret }, AGENT_ID);
     const command = installOneLineCommand(inner);
-    const bashCmd = `bash -o pipefail -c ${shellQuote(inner)}`;
-    // Full structural equality via digest (never snapshot raw command).
-    expect(sha(command)).toBe(
-      sha(`if [ "$(id -u)" -eq 0 ]; then ${bashCmd}; else sudo ${bashCmd}; fi`),
-    );
+    // shellQuote-unescape the wrapper ('\'' inside single quotes) so literal
+    // bootstrap shingles can be probed.
+    const unwrapped = command.split(`'\\''`).join("'");
     // Secret-free structural flags for debuggability on failure.
-    expect("posix-uid-guard?" + command.includes('if [ "$(id -u)" -eq 0 ]; then ')).toBe(
-      "posix-uid-guard?true",
-    );
-    expect("root-branch?" + (command.startsWith(`if [ "$(id -u)" -eq 0 ]; then `) ? "1" : "0")).toBe(
-      "root-branch?1",
-    );
+    expect("outer-wrap?" + (command.startsWith("bash -o pipefail -c '") && command.endsWith("'") ? "1" : "0")).toBe("outer-wrap?1");
+    const privateFlags = [
+      "umask 077",
+      "r=$(mktemp)",
+      "trap 'rm -f \"$r\"' EXIT",
+      "printf '%s\\n' ",
+      'chmod 600 "$r"',
+    ];
     expect(
-      "sudo-branch?" + command.includes(`; else sudo bash -o pipefail -c ${shellQuote(inner)}`),
-    ).toBe("sudo-branch?true");
+      "private-script?" + privateFlags.map((flag) => (unwrapped.includes(flag) ? "1" : "0")).join(""),
+    ).toBe("private-script?11111");
+    expect(
+      "uid-guard?" +
+        (command.includes('if [ "$(id -u)" -eq 0 ]; then bash "$r"; else sudo bash "$r"; fi')
+          ? "1"
+          : "0"),
+    ).toBe("uid-guard?1");
+    // sudo must never receive the eval-form bash invocation or the inner text.
+    expect("sudo-static?" + (command.includes('sudo bash -o pipefail') || command.includes('sudo -c') ? "leak" : "safe")).toBe("sudo-static?safe");
+    expect("sudo-only-path?" + command.includes('sudo bash "$r"')).toBe("sudo-only-path?true");
+    // CF Access headers and the download-fail guard stay inside the private script.
     expect(
       "cf-headers?" +
         `${command.includes("CF-Access-Client-Id:")},${command.includes("CF-Access-Client-Secret:")}`,
     ).toBe("cf-headers?true,true");
-    expect(
-      "dl-guard?" + (inner.includes("curl -fsSL --proto '=https' --tlsv1.2") ? "1" : "0"),
-    ).toBe("dl-guard?1");
+    expect("dl-guard?" + (inner.includes("curl -fsSL --proto '=https' --tlsv1.2") ? "1" : "0")).toBe("dl-guard?1");
     expect("export-env?" + command.includes("env ECP_URL=")).toBe("export-env?true");
-    // The identical bash command appears exactly twice (root + sudo branch).
-    expect("dup-count?" + command.split(bashCmd).length).toBe("dup-count?3");
-    expect("pipefail-count?" + command.split("bash -o pipefail -c ").length).toBe("pipefail-count?3");
   });
 
   it("root (mocked uid 0) runs the installer directly without sudo", async () => {
@@ -201,17 +225,19 @@ describe("generated install command (mocked uid/sudo/curl)", () => {
       const reported = parseLog(await readFile(join(dir, "install.log"), "utf8"));
       expect("ran?" + reported.ran).toBe("ran?installer");
       expect("uid?" + reported.MECH_UID).toBe(`uid?${ROOT_UID}`);
+      expect("sudo-user-empty?" + (reported.SUDO_USER ?? "")).toBe("sudo-user-empty?");
       for (const pair of SECRET_PAIRS()) {
         expectSecretEq(reported[pair[0]] ?? "", pair[1], pair[0]);
       }
       await expectAbsent(dir, "sudo.args");
       await expectAbsent(dir, PWN_SENTINEL);
+      expect("leftovers?" + (await leftoverTempCount(dir))).toBe("leftovers?0");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
   });
 
-  it("non-root (mocked uid != 0) re-runs the same bash command via sudo, quotes intact", async () => {
+  it("non-root (mocked uid != 0) runs the identical private script via sudo, secrets out of argv", async () => {
     const { dir, spawnEnv, inner, command } = await setupCase("nonroot", {
       uid: ALICE_UID,
       curlFail: false,
@@ -225,25 +251,33 @@ describe("generated install command (mocked uid/sudo/curl)", () => {
       for (const pair of SECRET_PAIRS()) {
         expectSecretEq(reported[pair[0]] ?? "", pair[1], pair[0]);
       }
-      // sudo receives exactly the same bash invocation with pre-quoting intact.
+      // sudo argv is exactly ["bash", <private temp path>] — no credentials.
       const sudoArgs = (await readFile(join(dir, "sudo.args"), "utf8")).split("\n")
         .filter((line) => line !== "");
-      expect("sudo-arg-count?" + sudoArgs.length).toBe("sudo-arg-count?5");
-      expect(
-        "sudo-pre?[" + [sudoArgs[0], sudoArgs[1], sudoArgs[2]].join(",") + "]",
-      ).toBe("sudo-pre?[bash,-o,pipefail]");
-      expect("sudo-c?" + sudoArgs[3]).toBe("sudo-c?-c");
-      expectSecretEq(sudoArgs[4] ?? "", inner, "sudo-bash-eval");
-      // sudo keeps the invoking-account metadata available to the installer stub.
+      expect("sudo-arg-count?" + sudoArgs.length).toBe("sudo-arg-count?2");
+      expect("sudo-argv0?" + sudoArgs[0]).toBe("sudo-argv0?bash");
+      expect("sudo-path-shape?" + (sudoArgs[1].startsWith(`${dir}/tmp.`) ? "1" : "0")).toBe("sudo-path-shape?1");
+      assertNoSecretsInSudoArgs(sudoArgs);
+      // fake sudo stat'ed the private script before exec: mode 600, and the
+      // bytes digest equals sha256(inner + "\n") without ever printing it.
+      const statLog = (await readFile(join(dir, "sudo.stat"), "utf8")).split("\n")
+        .filter((line) => line !== "");
+      expect("stat-lines?" + statLog.length).toBe("stat-lines?2");
+      expect("private-mode?" + statLog[0]).toBe("private-mode?600");
+      expectSecretEq(statLog[1] ?? "", sha(`${inner}\n`), "private-script-digest");
+      // The private script is removed by the bootstrap trap after the run.
+      await expect(stat(sudoArgs[1])).rejects.toThrow();
+      // sudo keeps the invoking-account metadata available to the child script.
       expect("sudo-user?" + (reported.SUDO_USER ?? "")).toBe("sudo-user?testuser-alice");
       expect("sudo-uid?" + (reported.SUDO_UID ?? "")).toBe("sudo-uid?1000");
       await expectAbsent(dir, PWN_SENTINEL);
+      expect("leftovers?" + (await leftoverTempCount(dir))).toBe("leftovers?0");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
   });
 
-  it("download failure keeps the installer payload from executing", async () => {
+  it("download failure keeps the payload from executing and still cleans the private script", async () => {
     for (const [label, uid] of [["root", ROOT_UID], ["nonroot", ALICE_UID]]) {
       const { dir, spawnEnv, command } = await setupCase(`dl-fail-${label}`, {
         uid,
@@ -256,6 +290,16 @@ describe("generated install command (mocked uid/sudo/curl)", () => {
         );
         await expectAbsent(dir, "install.log");
         await expectAbsent(dir, PWN_SENTINEL);
+        expect(`${label}-leftovers?` + (await leftoverTempCount(dir))).toBe(`${label}-leftovers?0`);
+        if (label === "nonroot") {
+          // fake sudo saw argv ["bash", <path>] even on failure; that path is
+          // gone after the bootstrap trap (failure path covered).
+          const sudoArgs = (await readFile(join(dir, "sudo.args"), "utf8")).split("\n")
+            .filter((line) => line !== "");
+          expect(`fail-${label}-argv-count?` + sudoArgs.length).toBe(`fail-${label}-argv-count?2`);
+          assertNoSecretsInSudoArgs(sudoArgs);
+          await expect(stat(sudoArgs[1])).rejects.toThrow();
+        }
       } finally {
         await rm(dir, { recursive: true, force: true });
       }

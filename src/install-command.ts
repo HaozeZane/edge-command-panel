@@ -45,12 +45,19 @@ export function buildInstallInner(
   );
 }
 
-// One-line install command: runs the installer directly when uid is 0,
-// otherwise re-runs the identical command through sudo (the agent service then
-// runs as the invoking account; sudo preserves SUDO_USER/SUDO_UID).
+// One-line install command: the inner installer body (which embeds the One
+// client credentials) is first written to a private 0600 temporary script, so
+// sudo's argv only carries `bash <path>` and sudo COMMAND logs cannot record
+// the credentials. The identical script runs directly when uid is 0, otherwise
+// through sudo (the agent service then runs as the invoking account; sudo
+// preserves SUDO_USER/SUDO_UID for the child script). Both the temp script and
+// the script's download temp file are removed on success and failure via trap.
 export function installOneLineCommand(inner: string): string {
-  const bashCmd = `bash -o pipefail -c ${shellQuote(inner)}`;
-  return `if [ "$(id -u)" -eq 0 ]; then ${bashCmd}; else sudo ${bashCmd}; fi`;
+  const bootstrap =
+    `set -euo pipefail; umask 077; r=$(mktemp); trap 'rm -f "$r"' EXIT; ` +
+    `printf '%s\\n' ${shellQuote(inner)} > "$r"; chmod 600 "$r"; ` +
+    `if [ "$(id -u)" -eq 0 ]; then bash "$r"; else sudo bash "$r"; fi`;
+  return `bash -o pipefail -c ${shellQuote(bootstrap)}`;
 }
 
 export function buildInstallCommand(
