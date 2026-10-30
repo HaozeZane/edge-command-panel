@@ -2,6 +2,7 @@ package agent_test
 
 import (
 	"bytes"
+	"edge-command-agent/internal/runlock"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -76,15 +77,29 @@ func newInstallSandbox(t *testing.T) *installSandbox {
 
 	for _, dir := range []string{
 		s.mockBin, s.serviceDir, s.tmpDir, s.rootHome, s.aliceHome,
-		filepath.Dir(s.binPath), filepath.Dir(s.unitPath),
+		filepath.Dir(s.binPath), filepath.Dir(s.unitPath), filepath.Dir(s.stateDir), filepath.Join(root, "usr", "local", "lib"),
 	} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
 
+	// Model production's root-owned 0755 /usr, /var and /etc ancestors;
+	// this workspace intentionally inherits a shared group-write umask.
+	if err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() && path != root {
+			return os.Chmod(path, 0755)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	for name, body := range map[string]string{
 		"id":        idMock,
+		"stat":      statMock,
 		"getent":    getentMock,
 		"systemctl": systemctlMock,
 		"curl":      curlMock,
@@ -106,6 +121,7 @@ func newInstallSandbox(t *testing.T) *installSandbox {
 	}
 	replacer := strings.NewReplacer(
 		prodUnitPath, s.unitPath,
+		"/usr/local/lib/edge-command-agent", filepath.Join(root, "usr", "local", "lib", "edge-command-agent"),
 		prodConfigDir, s.configDir,
 		prodStateDir, s.stateDir,
 		prodBinPath, s.binPath,
@@ -122,6 +138,7 @@ func newInstallSandbox(t *testing.T) *installSandbox {
 	}
 
 	s.env = map[string]string{
+		"MOCK_ROOT":          s.root,
 		"PATH":               s.mockBin + ":/usr/bin:/bin",
 		"TMPDIR":             s.tmpDir,
 		"HOME":               filepath.Join(root, "inherited-home"),
@@ -210,7 +227,7 @@ func (s *installSandbox) seed(Active bool) {
 	s.t.Helper()
 	s.write(s.configPath, []byte("{\"url\":\"wss://old.example/agent/ws\",\"agentId\":\"old-agent\",\"clientId\":\"old-id\",\"clientSecret\":\"old-secret\"}\n"), 0o600)
 	s.write(s.binPath, []byte("old binary\n"), 0o755)
-	s.write(s.unitPath, []byte("[Service]\nUser=edge-command\n"), 0o644)
+	s.write(s.unitPath, []byte("[Service]\nUser=edge-command\nExecStart=agent -execution-lock "+s.stateDir+"-lock/execution.lock\n"), 0o644)
 	s.write(filepath.Join(s.stateDir, "installation.json"), []byte("{\"installationId\":\"keep-me\",\"publicKey\":\"pub\",\"privateKey\":\"priv\"}\n"), 0o600)
 	s.write(filepath.Join(s.stateDir, "runs", "run-1.jsonl"), []byte("{\"event\":\"kept\"}\n"), 0o600)
 	if Active {
@@ -278,7 +295,7 @@ func TestInstallAsRootUsesRootAndKeepsSandbox(t *testing.T) {
 	unit := s.readUnit()
 	for _, want := range []string{
 		"User=root", "Group=root",
-		"WorkingDirectory=\"" + s.rootHome + "\"",
+		"WorkingDirectory=~",
 		"Environment=\"HOME=" + s.rootHome + "\"",
 		"NoNewPrivileges=yes", "ProtectSystem=strict", "PrivateTmp=yes",
 		"KillMode=control-group", "Restart=always",
@@ -335,7 +352,7 @@ func TestInstallViaSudoUsesNSSAccountNotInheritedHome(t *testing.T) {
 	unit := s.readUnit()
 	for _, want := range []string{
 		"User=alice", "Group=alice",
-		"WorkingDirectory=\"" + s.aliceHome + "\"",
+		"WorkingDirectory=~",
 		"Environment=\"HOME=" + s.aliceHome + "\"",
 		"NoNewPrivileges=yes", "ProtectSystem=strict", "PrivateTmp=yes",
 		"ReadWritePaths=" + s.stateDir,
@@ -374,7 +391,7 @@ func TestInstallEscapesHomeForSystemdUnit(t *testing.T) {
 
 	escaped := strings.ReplaceAll(home, "%", "%%")
 	unit := s.readUnit()
-	requireContains(t, unit, "WorkingDirectory=\""+escaped+"\"")
+	requireContains(t, unit, "WorkingDirectory=~")
 	requireContains(t, unit, "Environment=\"HOME="+escaped+"\"")
 }
 
@@ -581,7 +598,9 @@ func TestInstallStopFailureDoesNotModifyHost(t *testing.T) {
 				t.Fatalf("expected stop confirmation failure, stdout=%s stderr=%s", stdout, stderr)
 			}
 			events := s.events()
-			requireEvent(t, events, "systemctl stop")
+			if name != "show_query_error" && name != "state_unknown" {
+				requireEvent(t, events, "systemctl stop")
+			}
 			requireNoEvent(t, events, "install-file")
 			requireNoEvent(t, events, "chown ")
 			requireNoEvent(t, events, "systemctl restart")
@@ -660,7 +679,7 @@ func TestInstallRejectsSymlinkLayoutBeforeStopping(t *testing.T) {
 		}},
 		{"unit_file", func(s *installSandbox) string {
 			outside := filepath.Join(s.root, "outside-unit.service")
-			s.write(outside, []byte("[Service]\nUser=edge-command\n"), 0o644)
+			s.write(outside, []byte("[Service]\nUser=edge-command\nExecStart=agent -execution-lock "+s.stateDir+"-lock/execution.lock\n"), 0o644)
 			if err := os.Symlink(outside, s.unitPath); err != nil {
 				s.t.Fatal(err)
 			}
@@ -976,3 +995,85 @@ printf 'chown %s\n' "$*" >> "$MOCK_EVENT_LOG"
 if [ "${MOCK_FAIL_CHOWN:-0}" = "1" ]; then exit 1; fi
 exit 0
 `
+
+// Outside the fake root, the workspace's shared ownership/modes do not model
+// production /usr and /var. Inside it, use real stat so unsafe-layout tests
+// still exercise the complete installer permission checks.
+const statMock = `#!/bin/sh
+case "$3" in
+ "$MOCK_ROOT"|"$MOCK_ROOT"/*) exec /usr/bin/stat "$@" ;;
+ *) case "$2" in '%u') echo 0; exit 0 ;; '%a') echo 755; exit 0 ;; esac ;;
+esac
+exec /usr/bin/stat "$@"
+`
+
+func TestInstallRejectsRunningLegacyWithoutChangingFiles(t *testing.T) {
+	s := newInstallSandbox(t)
+	s.seed(true)
+	s.write(s.unitPath, []byte("[Service]\nUser=root\nExecStart=legacy\n"), 0644)
+	before := snapshot(t, s.configPath, s.binPath, s.unitPath)
+	_, stderr, err := s.run(nil, nil)
+	if err == nil || !strings.Contains(stderr, "wait for all commands") {
+		t.Fatalf("expected legacy guard, err=%v stderr=%s", err, stderr)
+	}
+	requireNoEvent(t, s.events(), "systemctl stop")
+	assertSnapshot(t, before)
+}
+
+func TestInstallerCreatesRootUpdaterAndStopsTimerForNoStart(t *testing.T) {
+	s := newInstallSandbox(t)
+	stdout, stderr, err := s.run(nil, nil)
+	requireNoError(t, stdout, stderr, err)
+	unitDir := filepath.Dir(s.unitPath)
+	for _, name := range []string{"edge-command-agent-update.service", "edge-command-agent-recover.service", "edge-command-agent-update.timer"} {
+		data := readFile(t, filepath.Join(unitDir, name))
+		if len(data) == 0 {
+			t.Fatal(name)
+		}
+	}
+	main := string(readFile(t, s.unitPath))
+	requireContains(t, main, "Type=notify")
+	requireContains(t, main, "-execution-lock "+s.stateDir+"-lock/execution.lock")
+	requireContains(t, string(readFile(t, filepath.Join(unitDir, "edge-command-agent-update.timer"))), "OnUnitInactiveSec=1h")
+	requireContains(t, string(readFile(t, filepath.Join(unitDir, "edge-command-agent-recover.service"))), "RemainAfterExit=yes")
+	for _, spec := range []struct {
+		p    string
+		mode os.FileMode
+	}{{s.stateDir + "-update", 0700}, {s.stateDir + "-lock/execution.lock", 0644}} {
+		st, err := os.Stat(spec.p)
+		if err != nil || st.Mode().Perm() != spec.mode {
+			t.Fatalf("permissions %s: %v %v", spec.p, st, err)
+		}
+	}
+	s.write(s.eventLog, nil, 0600)
+	stdout, stderr, err = s.run([]string{"--no-start"}, nil)
+	requireNoError(t, stdout, stderr, err)
+	events := s.events()
+	requireEvent(t, events, "systemctl stop edge-command-agent-update.timer")
+	requireNoEvent(t, events, "systemctl start ")
+	requireNoEvent(t, events, "systemctl restart ")
+}
+
+func TestReinstallCannotInterruptExecutionLockHolder(t *testing.T) {
+	s := newInstallSandbox(t)
+	s.seed(true)
+	lockDir := s.stateDir + "-lock"
+	if err := os.MkdirAll(lockDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	os.Chmod(lockDir, 0755)
+	lockPath := filepath.Join(lockDir, "execution.lock")
+	s.write(lockPath, nil, 0644)
+	held, err := runlock.OpenShared(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	before := snapshot(t, s.configPath, s.binPath, s.unitPath)
+	_, stderr, err := s.run(nil, nil)
+	if err == nil || !strings.Contains(stderr, "a command is running") {
+		t.Fatalf("busy reinstall: %v %s", err, stderr)
+	}
+	requireNoEvent(t, s.events(), "systemctl stop")
+	assertSnapshot(t, before)
+}

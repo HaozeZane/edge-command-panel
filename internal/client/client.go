@@ -24,6 +24,7 @@ import (
 	"edge-command-agent/internal/config"
 	"edge-command-agent/internal/journal"
 	"edge-command-agent/internal/protocol"
+	"edge-command-agent/internal/runlock"
 	"edge-command-agent/internal/runner"
 )
 
@@ -49,6 +50,13 @@ type Options struct {
 	Inflight     int
 	Runner       runner.Options
 	Logger       *log.Logger
+	// ExecutionLock is the root-managed flock path used to keep an updater
+	// from stopping the service during a run. Empty disables locking for
+	// development and tests.
+	ExecutionLock string
+	// OnReady is called once after the command loop and journal are ready,
+	// before any WebSocket connection is attempted.
+	OnReady func()
 }
 
 // Agent is a single long-lived agent instance.
@@ -134,6 +142,9 @@ func (a *Agent) Run(ctx context.Context) error {
 	defer a.cancel()
 	a.workerWG.Add(1)
 	go a.commandLoop(a.ctx)
+	if a.opt.OnReady != nil {
+		a.opt.OnReady()
+	}
 
 	backoff := a.opt.ReconnectMin
 	for {
@@ -247,15 +258,34 @@ func (a *Agent) handleExecute(ctx context.Context, env protocol.Envelope) {
 		a.reject(env, "accept_expired")
 		return
 	}
+	var executionLock *runlock.Lock
+	if a.opt.ExecutionLock != "" {
+		var err error
+		executionLock, err = runlock.OpenShared(a.opt.ExecutionLock)
+		// A killed updater releases flock, but its durable fence must keep
+		// commands blocked until the saved transaction is recovered.
+		if err == nil {
+			if _, fenceErr := os.Lstat(a.opt.ExecutionLock + ".pending"); !errors.Is(fenceErr, os.ErrNotExist) {
+				executionLock.Close()
+				a.reject(env, "updating")
+				return
+			}
+		}
+		if err != nil {
+			a.reject(env, "updating")
+			return
+		}
+	}
 	run, err := a.j.Begin(env.RunID, env.Command, env.TimeoutSec, env.AcceptBefore)
 	if err != nil {
+		executionLock.Close()
 		a.opt.Logger.Printf("execute %s: journal: %v", env.RunID, err)
 		return
 	}
 	a.active.Store(env.RunID)
 	a.signal()
 	a.wg.Add(1)
-	go a.execute(ctx, run)
+	go a.execute(ctx, run, executionLock)
 }
 
 func (a *Agent) reject(env protocol.Envelope, reason string) {
@@ -274,8 +304,9 @@ func (a *Agent) reject(env protocol.Envelope, reason string) {
 	a.signal()
 }
 
-func (a *Agent) execute(ctx context.Context, run *journal.Run) {
+func (a *Agent) execute(ctx context.Context, run *journal.Run, executionLock *runlock.Lock) {
 	defer a.wg.Done()
+	defer executionLock.Close()
 	defer a.active.Store("")
 
 	res := runner.Run(ctx, a.opt.Runner, a.opt.WorkingDir, run.Command,

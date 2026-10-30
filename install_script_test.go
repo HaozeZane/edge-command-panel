@@ -31,7 +31,7 @@ func TestInstallScriptSyntaxAndGuards(t *testing.T) {
 		"set -eu", "umask 077", "NoNewPrivileges=yes", "ProtectSystem=strict",
 		"PrivateTmp=yes", "KillMode=control-group", "Restart=always",
 		"User=$TARGET_USER", "Group=$TARGET_GROUP",
-		"WorkingDirectory=\"$HOME_ESCAPED\"", "Environment=\"HOME=$HOME_ESCAPED\"",
+		"WorkingDirectory=~", "Environment=\"HOME=$HOME_ESCAPED\"",
 		"ReadWritePaths=$STATE_DIR", "CF-Access-Client-Id",
 		"CF-Access-Client-Secret", `-H "@$HEADER_FILE"`, "chmod 600",
 		"edge-command-agent.service", "--no-start", "systemctl is-active",

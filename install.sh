@@ -22,6 +22,15 @@ STATE_DIR=/var/lib/edge-command-agent
 BIN_PATH=/usr/local/bin/edge-command-agent
 UNIT_PATH=/etc/systemd/system/edge-command-agent.service
 SERVICE_NAME=edge-command-agent.service
+LIBEXEC_DIR=/usr/local/lib/edge-command-agent
+BOOTSTRAP_PATH=$LIBEXEC_DIR/bootstrap
+UPDATE_DIR=${STATE_DIR}-update
+LOCK_DIR=${STATE_DIR}-lock
+EXECUTION_LOCK=$LOCK_DIR/execution.lock
+UPDATE_SERVICE=edge-command-agent-update.service
+RECOVERY_SERVICE=edge-command-agent-recover.service
+UPDATE_TIMER=edge-command-agent-update.timer
+UNIT_DIR=${UNIT_PATH%/*}
 START=1
 TARGET_USER=
 TARGET_UID=
@@ -231,29 +240,91 @@ cleanup() {
     [ -z "${UNIT_STAGE:-}" ] || rm -f "$UNIT_STAGE"
 }
 
-stop_existing_service() {
-    if [ ! -e "$UNIT_PATH" ]; then
-        return 0
-    fi
-    # Stop unconditionally. Any non-zero exit (including an unreachable
-    # manager) is fatal: never migrate while the old service might be running.
-    if ! systemctl stop "$SERVICE_NAME"; then
-        fail "failed to stop $SERVICE_NAME; no installer changes were made"
-    fi
-    # Accept only an explicitly inactive/failed state. Unknown output, an
-    # active/deactivating service, or a query error is not "stopped".
-    if ! ACTIVE_STATE=$(systemctl show --property=ActiveState --value "$SERVICE_NAME"); then
-        fail "cannot query $SERVICE_NAME state; no installer changes were made"
-    fi
+# Updater paths are root-controlled and separate from Agent-writable state.
+check_root_path() {
+    path=$1
+    while [ "$path" != / ]; do
+        [ ! -L "$path" ] || fail "root-managed path is a symlink: $path"
+        if [ -e "$path" ]; then
+            owner=$(stat -c '%u' "$path") || fail "cannot stat $path"
+            perms=$(stat -c '%a' "$path") || fail "cannot stat $path"
+            [ "$owner" = 0 ] || fail "root-managed path is not owned by root: $path"
+            [ $((0$perms & 0022)) -eq 0 ] || fail "root-managed path is writable by another account: $path"
+        fi
+        path=${path%/*}
+        [ -n "$path" ] || path=/
+    done
+}
+
+check_legacy_service() {
+    [ -e "$UNIT_PATH" ] || return 0
+    ACTIVE_STATE=$(systemctl show --property=ActiveState --value "$SERVICE_NAME") || fail "cannot query existing service"
     case "$ACTIVE_STATE" in
-        inactive|failed) ;;
-        *) fail "failed to confirm $SERVICE_NAME stopped (ActiveState=$ACTIVE_STATE); no installer changes were made" ;;
+        inactive|failed) return 0 ;;
+        active|activating|deactivating|reloading)
+            if ! grep -Fq -- "-execution-lock $EXECUTION_LOCK" "$UNIT_PATH"; then
+                fail "old Agent service is running without an update execution lock; wait for all commands to finish, run sudo systemctl stop edge-command-agent.service, then run this installer again"
+            fi
+            ;;
+        *) fail "unknown service state: $ACTIVE_STATE" ;;
     esac
+}
+
+prepare_update_locks() {
+    for path in "$LIBEXEC_DIR" "$UPDATE_DIR" "$LOCK_DIR" "$BIN_PATH" "$UNIT_PATH"; do
+        check_root_path "$path"
+    done
+    for file in "$BOOTSTRAP_PATH" "$EXECUTION_LOCK" "$UPDATE_DIR/updater.lock" "$UNIT_DIR/$UPDATE_SERVICE" "$UNIT_DIR/$RECOVERY_SERVICE" "$UNIT_DIR/$UPDATE_TIMER"; do
+        [ ! -L "$file" ] || fail "root-managed file is a symlink: $file"
+        [ ! -e "$file" ] || [ -f "$file" ] || fail "root-managed path is not a regular file: $file"
+        check_root_path "$file"
+    done
+    install -d -o root -g root -m 0755 "$LIBEXEC_DIR" "$LOCK_DIR" || fail "cannot prepare update directories"
+    install -d -o root -g root -m 0700 "$UPDATE_DIR" || fail "cannot prepare private update state"
+    # Never replace these inodes: other processes may still hold flock on them.
+    touch "$EXECUTION_LOCK" "$UPDATE_DIR/updater.lock"
+    chmod 0644 "$EXECUTION_LOCK"
+    chmod 0600 "$UPDATE_DIR/updater.lock"
+    exec 8>>"$UPDATE_DIR/updater.lock"
+    flock -n -x 8 || fail "an updater or installer is already running; retry later"
+    if [ -e "$UPDATE_DIR/transaction.json" ] || [ -e "$EXECUTION_LOCK.pending" ] || [ -L "$EXECUTION_LOCK.pending" ]; then
+        fail "an interrupted update exists; recover it with the installed bootstrap before reinstalling"
+    fi
+    exec 9>>"$EXECUTION_LOCK"
+    flock -n -x 9 || fail "a command is running; wait for it to finish before reinstalling"
+}
+
+stop_existing_service() {
+    if [ -e "$UNIT_DIR/$UPDATE_TIMER" ]; then
+        systemctl stop "$UPDATE_TIMER" || fail "cannot stop the previous update timer"
+    fi
+    if [ -e "$UNIT_PATH" ]; then
+        systemctl stop "$SERVICE_NAME" || fail "failed to stop $SERVICE_NAME; no installer changes were made"
+        ACTIVE_STATE=$(systemctl show --property=ActiveState --value "$SERVICE_NAME") || fail "cannot query service state"
+        case "$ACTIVE_STATE" in
+            inactive|failed) ;;
+            *) fail "failed to confirm $SERVICE_NAME stopped (ActiveState=$ACTIVE_STATE); no installer changes were made" ;;
+        esac
+    fi
+    if [ -e "$UNIT_DIR/$RECOVERY_SERVICE" ]; then
+        systemctl stop "$RECOVERY_SERVICE" || fail "cannot reset boot recovery service"
+    fi
+}
+
+stage_root_file() {
+    src=$1 dest=$2 mode=$3
+    UNIT_STAGE=$dest.new.$$
+    [ ! -e "$UNIT_STAGE" ] && [ ! -L "$UNIT_STAGE" ] || fail "unexpected staged file: $UNIT_STAGE"
+    install -o root -g root -m "$mode" "$src" "$UNIT_STAGE" || fail "failed to stage $dest"
+    mv -f "$UNIT_STAGE" "$dest" || fail "failed to replace $dest"
+    UNIT_STAGE=
 }
 
 resolve_identity
 check_managed_paths
 command -v systemctl >/dev/null 2>&1 || fail "systemctl is required"
+command -v flock >/dev/null 2>&1 || fail "flock (util-linux) is required"
+check_legacy_service
 
 TMP_DIR=$(mktemp -d)
 trap cleanup EXIT INT TERM
@@ -279,6 +350,7 @@ fi
 
 # The old service has to be fully stopped before the binary, configuration or
 # state ownership is replaced. Without --no-start it is started again below.
+prepare_update_locks
 stop_existing_service
 
 install -d -o root -g "$TARGET_GID" -m 0750 "$CONFIG_DIR" || fail "failed to prepare $CONFIG_DIR"
@@ -325,16 +397,19 @@ UNIT_TMP=$TMP_DIR/unit
 cat > "$UNIT_TMP" <<EOF
 [Unit]
 Description=Edge Command Agent
-After=network-online.target
+After=network-online.target $RECOVERY_SERVICE
 Wants=network-online.target
+Requires=$RECOVERY_SERVICE
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
+TimeoutStartSec=45
 User=$TARGET_USER
 Group=$TARGET_GROUP
-WorkingDirectory="$HOME_ESCAPED"
+WorkingDirectory=~
 Environment="HOME=$HOME_ESCAPED"
-ExecStart=$BIN_PATH -config $CONFIG_PATH
+ExecStart=$BIN_PATH -config $CONFIG_PATH -execution-lock $EXECUTION_LOCK
 Restart=always
 RestartSec=5
 KillMode=control-group
@@ -352,6 +427,57 @@ install -o root -g root -m 0644 "$UNIT_TMP" "$UNIT_STAGE" || fail "failed to sta
 mv -f "$UNIT_STAGE" "$UNIT_PATH" || fail "failed to replace systemd unit"
 UNIT_STAGE=
 
+stage_root_file "$TMP_BIN" "$BOOTSTRAP_PATH" 0755
+cat > "$TMP_DIR/recover-unit" <<EOF
+[Unit]
+Description=Recover interrupted Edge Command Agent updates
+Before=$SERVICE_NAME
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=root
+ExecStart=$BOOTSTRAP_PATH bootstrap recover
+TimeoutStartSec=60
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=$BIN_DIR $UPDATE_DIR $LOCK_DIR
+EOF
+stage_root_file "$TMP_DIR/recover-unit" "$UNIT_DIR/$RECOVERY_SERVICE" 0644
+cat > "$TMP_DIR/update-unit" <<EOF
+[Unit]
+Description=Update idle Edge Command Agent from the official stable release
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=$BOOTSTRAP_PATH bootstrap update
+TimeoutStartSec=21min
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=$BIN_DIR $UPDATE_DIR $LOCK_DIR
+EOF
+stage_root_file "$TMP_DIR/update-unit" "$UNIT_DIR/$UPDATE_SERVICE" 0644
+cat > "$TMP_DIR/update-timer" <<EOF
+[Unit]
+Description=Check for stable Edge Command Agent updates
+
+[Timer]
+OnActiveSec=5min
+OnUnitInactiveSec=1h
+RandomizedDelaySec=5min
+Unit=$UPDATE_SERVICE
+
+[Install]
+WantedBy=timers.target
+EOF
+stage_root_file "$TMP_DIR/update-timer" "$UNIT_DIR/$UPDATE_TIMER" 0644
 systemctl daemon-reload || fail "systemctl daemon-reload failed"
 
 if [ "$START" -eq 0 ]; then
@@ -359,6 +485,11 @@ if [ "$START" -eq 0 ]; then
     exit 0
 fi
 
+# Keep both locks through startup. Boot recovery sees the installer's singleton
+# lock and skips (there is no pending transaction); the new Agent cannot start
+# commands until this installer exits and releases fd 9.
+systemctl enable "$UPDATE_TIMER" >/dev/null || fail "failed to enable update timer"
+systemctl start "$UPDATE_TIMER" || fail "failed to start update timer"
 systemctl enable "$SERVICE_NAME" >/dev/null || fail "failed to enable $SERVICE_NAME"
 systemctl restart "$SERVICE_NAME" || fail "failed to restart $SERVICE_NAME"
 

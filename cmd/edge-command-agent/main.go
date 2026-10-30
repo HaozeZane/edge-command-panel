@@ -12,15 +12,18 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"edge-command-agent/internal/client"
 	"edge-command-agent/internal/config"
 	"edge-command-agent/internal/enroll"
 	"edge-command-agent/internal/journal"
+	"edge-command-agent/internal/sdnotify"
+	"edge-command-agent/internal/update"
 )
 
 // Version is overridden with -ldflags at build time.
-var Version = "0.1.0"
+var Version = "0.1.2"
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.LUTC)
@@ -44,19 +47,73 @@ func run(args []string) error {
 		return runConfigure(args[1:])
 	case "run":
 		return runAgent(args[1:])
+	case "bootstrap":
+		return runBootstrap(args[1:])
 	default:
 		if len(args[0]) > 0 && args[0][0] == '-' {
 			return runAgent(args)
 		}
-		return fmt.Errorf("unknown command %q (want run, enroll, configure, version)", args[0])
+		return fmt.Errorf("unknown command %q (want run, enroll, configure, bootstrap, version)", args[0])
+	}
+}
+
+func runBootstrap(args []string) error {
+	if len(args) != 1 {
+		return errors.New("bootstrap: want exactly one of update or recover")
+	}
+	if os.Geteuid() != 0 {
+		return errors.New("bootstrap: must run as root")
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Minute)
+	defer cancel()
+	u, err := update.New(update.Options{})
+	if err != nil {
+		return err
+	}
+	switch args[0] {
+	case "update":
+		res, err := u.Run(ctx)
+		if err != nil {
+			return err
+		}
+		log.Printf("bootstrap update: status=%s version=%s reason=%s nextCheck=%s",
+			res.Status, res.Version, res.Reason, res.NextCheck.UTC().Format(time.RFC3339))
+		if res.Status == update.StatusBlocked {
+			return errors.New("updates blocked; inspect the update service journal and saved transaction")
+		}
+		return nil
+	case "recover":
+		res, err := u.RecoverBoot(ctx)
+		if err != nil {
+			return err
+		}
+		log.Printf("bootstrap recover: status=%s version=%s reason=%s nextCheck=%s",
+			res.Status, res.Version, res.Reason, res.NextCheck.UTC().Format(time.RFC3339))
+		if res.Status == update.StatusBlocked {
+			return errors.New("boot recovery blocked; repair the saved transaction before starting the agent")
+		}
+		return nil
+	default:
+		return fmt.Errorf("bootstrap: unknown operation %q (want update or recover)", args[0])
 	}
 }
 
 func runAgent(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	cfgPath := fs.String("config", config.DefaultPath, "configuration file")
+	lockPath := fs.String("execution-lock", "", "root-managed execution/update lock file")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *lockPath != "" {
+		if err := update.ValidateRootDir(filepath.Dir(*lockPath)); err != nil {
+			return err
+		}
+		if err := update.ValidateRootFile(*lockPath); err != nil {
+			return err
+		}
 	}
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
@@ -70,7 +127,14 @@ func runAgent(args []string) error {
 	if err := j.ReconcileInterrupted(); err != nil {
 		return fmt.Errorf("reconcile journal: %w", err)
 	}
-	agent, err := client.New(client.Options{Config: cfg, Journal: j, Version: Version})
+	agent, err := client.New(client.Options{
+		Config: cfg, Journal: j, Version: Version, ExecutionLock: *lockPath,
+		OnReady: func() {
+			if err := sdnotify.Ready(); err != nil {
+				log.Printf("systemd readiness notification failed: %v", err)
+			}
+		},
+	})
 	if err != nil {
 		return err
 	}

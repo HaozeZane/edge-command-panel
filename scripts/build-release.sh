@@ -4,8 +4,8 @@
 # Usage:
 #   scripts/build-release.sh [VERSION]
 #
-# VERSION defaults to 0.1.1. The form "agent-v0.1.1" (and "v0.1.1") is
-# normalized to 0.1.1. Output goes to .release/agent-v<VERSION> by default;
+# VERSION defaults to 0.1.2. The form "agent-v0.1.2" (and "v0.1.2") is
+# normalized to 0.1.2. Output goes to .release/agent-v<VERSION> by default;
 # set RELEASE_OUTPUT_DIR to override it.
 #
 # This script only builds locally. It never calls gh, Wrangler, or GitHub
@@ -19,7 +19,7 @@ usage() {
     cat <<'EOF'
 Usage: scripts/build-release.sh [VERSION]
 
-VERSION        release version (default: 0.1.1); "agent-v0.1.1" is accepted
+VERSION        release version (default: 0.1.2); "agent-v0.1.2" is accepted
 GO             Go executable to use (default: go)
 RELEASE_OUTPUT_DIR
                output directory (default: .release/agent-v<VERSION>)
@@ -40,26 +40,17 @@ if [ "$#" -gt 1 ]; then
     exit 2
 fi
 
-RAW_VERSION=${1:-0.1.1}
+RAW_VERSION=${1:-0.1.2}
 case "$RAW_VERSION" in
     agent-v*) VERSION=${RAW_VERSION#agent-v} ;;
     v*) VERSION=${RAW_VERSION#v} ;;
     *) VERSION=$RAW_VERSION ;;
 esac
 
-case "$VERSION" in
-    ""|.|..|*..*|.*|*.|*[!0-9A-Za-z.+-]*)
-        echo "error: invalid version: $RAW_VERSION" >&2
-        exit 2
-        ;;
-esac
-case "$VERSION" in
-    [0-9]*.[0-9]*.[0-9]*) ;;
-    *)
-        echo "error: version must look like 0.1.1 or agent-v0.1.1" >&2
-        exit 2
-        ;;
-esac
+if ! printf '%s\n' "$VERSION" | grep -Eq '^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$'; then
+    echo "error: version must be three numeric components without leading zeros" >&2
+    exit 2
+fi
 
 GO=${GO:-go}
 if ! command -v "$GO" >/dev/null 2>&1; then
