@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
   "repository": "HaozeZane/edge-command-panel",
-  "tag": "agent-v0.1.1",
-  "agentCommit": "695bffbee45fdce3d31e28f167bfe90cf21638cf",
-  "checksumsSha256": "142d85844d8673dff86447451d3ee0cfb477ad7b1a12b9e8493d9b471467e421",
+  "tag": "agent-v0.1.2",
+  "agentCommit": "249e780401b92ed584e52b39f512b21d715e65b4",
+  "checksumsSha256": "4cfcaf2c4f4bb2d94e7746388fdc0b29f24d814e068ca8b821411cc73f2af644",
   "assets": {
-    "edge-agent-linux-amd64": "a3a70eb160087638f6b72e8aa57bb39f115f6bdb9b70b1071437290811107781",
-    "edge-agent-linux-arm64": "d3dee8a1b41a98cd5fba2db7999300e8dfdd309b7c179865251f3acf11f8d7e6",
-    "install.sh": "edadb8148a00c4de7af2dd699d8acfd03caedd0119624bd30c5a8cdeb55d3645"
+    "edge-agent-linux-amd64": "4af1c916913aea70ae5cde4fc916fc09cc0763e9d510b053586b8895b35e752c",
+    "edge-agent-linux-arm64": "7fe703ee5894b35cdbac54b24a0231907c822bf3323e68d1005ed544576c72f9",
+    "install.sh": "3d70b8cf62cd717ac43cbd8a5b31f1d389547dec4ef8184a69e6143f23374c9e"
   }
 }

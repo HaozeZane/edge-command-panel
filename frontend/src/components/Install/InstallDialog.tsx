@@ -106,7 +106,10 @@ export const InstallDialog: React.FC<InstallDialogProps> = ({
             </pre>
           </div>
           <p className="text-[11px] text-slate-400 leading-relaxed">
-            普通用户粘贴执行即可：命令会自动通过 sudo 安装（可能提示当前 sudo 密码），Agent 随后以发起安装的原登录账号运行；以 root 执行则 Agent 以 root 运行（现有 systemd 服务隔离继续适用）。注意：复用本机身份、不新增机器且不消耗注册名额，仅适用于重复执行批量接入（enroll）安装且本机已存在有效配置的情况；单台机器（direct）安装仍会以所选机器的凭据显式覆盖本机配置。复用或覆盖时都会升级 Agent 并伴随服务重启，可能中断正在执行的任务；已保留的本地旧业务命令记录不会重新执行。
+            普通用户粘贴执行即可：命令会自动通过 sudo 安装（可能提示当前 sudo 密码），Agent 随后以发起安装的原登录账号运行；以 root 执行则 Agent 以 root 运行（现有 systemd 服务隔离继续适用）。注意：复用本机身份、不新增机器且不消耗注册名额，仅适用于重复执行批量接入（enroll）安装且本机已存在有效配置的情况；单台机器（direct）安装仍会以所选机器的凭据显式覆盖本机配置。重装会更新并重启 Agent，请先确认任务已经结束；已完成的本地旧业务命令不会重新执行。
+          </p>
+          <p className="text-[11px] text-slate-400 leading-relaxed">
+            新安装会附带启用自动检查更新：仅机器空闲且校验通过才升级，失败自动回退。旧版本 Agent 不具备更新组件，需重新执行一次最新安装命令启用；只要旧版 Agent 服务仍在运行就会被拒绝迁移（安装器无法感知旧版任务）——请先确认所有任务结束、执行 <code>sudo systemctl stop edge-command-agent.service</code>，再执行。配置复用/覆盖与运行账户规则见上方说明，现有 systemd 服务隔离继续适用。
           </p>
         </div>
 
